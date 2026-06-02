@@ -15,7 +15,7 @@ export const defaultWorkspaceLayout: WorkspaceLayoutState = {
   leftVisible: true,
   rightVisible: true,
   bottomVisible: true,
-  activeActivity: "scene",
+  activeActivity: "materials",
   activePanel: "console",
 };
 
@@ -48,4 +48,3 @@ export function saveWorkspaceLayout(layout: WorkspaceLayoutState) {
 
   localStorage.setItem(STORAGE_KEY, JSON.stringify(layout));
 }
-
