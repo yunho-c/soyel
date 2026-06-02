@@ -37,12 +37,14 @@
     applyMaterialToSelection,
     downloadPolyHavenMaterial,
     polyHavenMaterialFiles,
+    polyHavenTextureCategories,
     renderPreviewFrame,
     rendererStatus,
     searchPolyHavenMaterials,
     selectSceneSurface,
     type DownloadedMaterial,
     type MaterialFile,
+    type PolyHavenCategory,
     type PolyHavenMaterial,
     type RenderPreviewFrame,
     type RendererStatus,
@@ -57,6 +59,7 @@
   let layout = $state(loadWorkspaceLayout());
   let status = $state<RendererStatus | null>(null);
   let materials = $state<PolyHavenMaterial[]>([]);
+  let materialCategories = $state<PolyHavenCategory[]>([{ id: "all", name: "All", count: 0 }]);
   let selectedMaterial = $state<PolyHavenMaterial | null>(null);
   let selectedFiles = $state<MaterialFile[]>([]);
   let downloaded = $state<DownloadedMaterial | null>(null);
@@ -99,18 +102,6 @@
     { id: "control-dial", label: "Control Dial", meta: "Knurled insert", icon: CircleDotDashedIcon },
   ];
 
-  const categories = [
-    "all",
-    "floor",
-    "wood",
-    "metal",
-    "fabric",
-    "rock",
-    "brick",
-    "plaster/concrete",
-    "terrain",
-  ];
-
   const roleLabels: Record<string, string> = {
     baseColor: "Base color",
     roughness: "Roughness",
@@ -135,6 +126,7 @@
 
   onMount(async () => {
     await refreshStatus();
+    await loadCategories();
     await loadMaterials();
     await refreshPreviewFrame();
   });
@@ -183,6 +175,19 @@
       errorMessage = String(error);
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function loadCategories() {
+    try {
+      const categories = await polyHavenTextureCategories();
+      materialCategories = categories.length ? categories : materialCategories;
+
+      if (!materialCategories.some((item) => item.id === category)) {
+        category = "all";
+      }
+    } catch (error) {
+      errorMessage = String(error);
     }
   }
 
@@ -482,8 +487,10 @@
                     class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
                     onchange={loadMaterials}
                   >
-                    {#each categories as item}
-                      <option value={item}>{item}</option>
+                    {#each materialCategories as item}
+                      <option value={item.id}>
+                        {item.name}{item.count ? ` (${item.count})` : ""}
+                      </option>
                     {/each}
                   </select>
                   <select

@@ -160,6 +160,14 @@ struct PolyHavenMaterial {
     date_published: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolyHavenCategory {
+    id: String,
+    name: String,
+    count: u64,
+}
+
 impl PolyHavenMaterial {
     fn from_asset(id: String, asset: PolyHavenAsset) -> Option<Self> {
         if asset.asset_type != 1 {
@@ -385,6 +393,25 @@ async fn polyhaven_search_materials(
 
     materials.truncate(limit.unwrap_or(48).clamp(1, 200));
     Ok(materials)
+}
+
+#[tauri::command]
+async fn polyhaven_texture_categories(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PolyHavenCategory>, String> {
+    let categories = state
+        .polyhaven
+        .get(format!("{POLYHAVEN_API}/categories/textures"))
+        .send()
+        .await
+        .map_err(polyhaven_error)?
+        .error_for_status()
+        .map_err(polyhaven_error)?
+        .json::<HashMap<String, u64>>()
+        .await
+        .map_err(polyhaven_error)?;
+
+    Ok(texture_categories_from_counts(categories))
 }
 
 fn render_lupin_preview(
@@ -1009,6 +1036,48 @@ fn resolution_rank(resolution: &str) -> u32 {
     normalized.parse::<u32>().unwrap_or_default()
 }
 
+fn texture_categories_from_counts(counts: HashMap<String, u64>) -> Vec<PolyHavenCategory> {
+    let mut categories = counts
+        .into_iter()
+        .map(|(id, count)| PolyHavenCategory {
+            name: category_label(&id),
+            id,
+            count,
+        })
+        .collect::<Vec<_>>();
+
+    categories.sort_by(|a, b| {
+        (a.id != "all")
+            .cmp(&(b.id != "all"))
+            .then(b.count.cmp(&a.count))
+            .then(a.name.cmp(&b.name))
+    });
+    categories
+}
+
+fn category_label(id: &str) -> String {
+    if id == "all" {
+        return "All".to_string();
+    }
+
+    id.split('/')
+        .map(|part| {
+            part.split(['-', ' '])
+                .filter(|word| !word.is_empty())
+                .map(|word| {
+                    let mut chars = word.chars();
+                    let Some(first) = chars.next() else {
+                        return String::new();
+                    };
+                    format!("{}{}", first.to_uppercase(), chars.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 fn texture_filename(id: &str, file: &MaterialFile) -> String {
     format!(
         "{}_{}_{}.{}",
@@ -1053,6 +1122,7 @@ pub fn run() {
             apply_material_to_selection,
             render_preview_frame,
             polyhaven_search_materials,
+            polyhaven_texture_categories,
             polyhaven_material_files,
             download_polyhaven_material,
         ])

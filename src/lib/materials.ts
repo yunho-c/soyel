@@ -28,6 +28,12 @@ export type PolyHavenMaterial = {
   datePublished?: number;
 };
 
+export type PolyHavenCategory = {
+  id: string;
+  name: string;
+  count: number;
+};
+
 export type RendererStatus = {
   engineName: string;
   engineVersion: string;
@@ -165,6 +171,30 @@ const mockMaterials: PolyHavenMaterial[] = [
   },
 ];
 
+const mockCategories: PolyHavenCategory[] = [
+  {
+    id: "all",
+    name: "All",
+    count: mockMaterials.length,
+  },
+  ...Array.from(new Set(mockMaterials.flatMap((material) => material.categories)))
+    .sort()
+    .map((id) => ({
+      id,
+      name: id
+        .split("/")
+        .map((part) =>
+          part
+            .split(/[- ]+/)
+            .filter(Boolean)
+            .map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
+            .join(" "),
+        )
+        .join(" / "),
+      count: mockMaterials.filter((material) => material.categories.includes(id)).length,
+    })),
+];
+
 const mockStatus: RendererStatus = {
   engineName: "LupinPathTracer",
   engineVersion: "0.1.0",
@@ -230,6 +260,14 @@ export async function searchPolyHavenMaterials(args: {
   }
 
   return invoke<PolyHavenMaterial[]>("polyhaven_search_materials", args);
+}
+
+export async function polyHavenTextureCategories() {
+  if (!hasTauriRuntime()) {
+    return mockCategories;
+  }
+
+  return invoke<PolyHavenCategory[]>("polyhaven_texture_categories");
 }
 
 export async function polyHavenMaterialFiles(id: string, resolution: string) {
