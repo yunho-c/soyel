@@ -37,12 +37,14 @@
     applyMaterialToSelection,
     downloadPolyHavenMaterial,
     polyHavenMaterialFiles,
+    renderPreviewFrame,
     rendererStatus,
     searchPolyHavenMaterials,
     selectSceneSurface,
     type DownloadedMaterial,
     type MaterialFile,
     type PolyHavenMaterial,
+    type RenderPreviewFrame,
     type RendererStatus,
   } from "$lib/materials";
   import {
@@ -58,12 +60,15 @@
   let selectedMaterial = $state<PolyHavenMaterial | null>(null);
   let selectedFiles = $state<MaterialFile[]>([]);
   let downloaded = $state<DownloadedMaterial | null>(null);
+  let previewFrame = $state<RenderPreviewFrame | null>(null);
+  let previewCanvas = $state<HTMLCanvasElement | null>(null);
   let query = $state("");
   let category = $state("all");
   let sort = $state("popular");
   let resolution = $state("2k");
   let isLoading = $state(false);
   let isApplying = $state(false);
+  let isRendering = $state(false);
   let errorMessage = $state("");
 
   const activities = [
@@ -122,9 +127,16 @@
     saveWorkspaceLayout(layout);
   });
 
+  $effect(() => {
+    if (previewCanvas && previewFrame) {
+      paintPreviewFrame(previewCanvas, previewFrame);
+    }
+  });
+
   onMount(async () => {
     await refreshStatus();
     await loadMaterials();
+    await refreshPreviewFrame();
   });
 
   function updateLayout(next: Partial<typeof layout>) {
@@ -200,6 +212,7 @@
   async function selectSurface(id: string, label: string) {
     try {
       status = await selectSceneSurface(id, label);
+      await refreshPreviewFrame();
     } catch (error) {
       errorMessage = String(error);
     }
@@ -222,6 +235,7 @@
         authors: selectedMaterial.authors,
         maps: selectedFiles,
       });
+      await refreshPreviewFrame();
     } catch (error) {
       errorMessage = String(error);
     } finally {
@@ -282,6 +296,61 @@
 
   function appliedForSurface(surfaceId: string) {
     return status?.appliedMaterials.find((material) => material.surfaceId === surfaceId);
+  }
+
+  async function refreshPreviewFrame() {
+    isRendering = true;
+    errorMessage = "";
+
+    try {
+      previewFrame = await renderPreviewFrame({
+        width: 360,
+        height: 260,
+        samples: 6,
+      });
+    } catch (error) {
+      errorMessage = String(error);
+    } finally {
+      isRendering = false;
+    }
+  }
+
+  function paintPreviewFrame(canvas: HTMLCanvasElement, frame: RenderPreviewFrame) {
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    if (frame.pixels.length !== frame.width * frame.height * 4) {
+      paintBrowserPreview(context, frame);
+      return;
+    }
+
+    const imageData = context.createImageData(frame.width, frame.height);
+    imageData.data.set(frame.pixels);
+    context.putImageData(imageData, 0, 0);
+  }
+
+  function paintBrowserPreview(context: CanvasRenderingContext2D, frame: RenderPreviewFrame) {
+    const gradient = context.createLinearGradient(0, 0, frame.width, frame.height);
+    gradient.addColorStop(0, "#8f958b");
+    gradient.addColorStop(0.48, "#383d38");
+    gradient.addColorStop(1, "#141817");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, frame.width, frame.height);
+
+    context.fillStyle = "rgba(255,255,255,0.18)";
+    context.beginPath();
+    context.ellipse(frame.width * 0.5, frame.height * 0.5, frame.width * 0.26, frame.height * 0.34, -0.28, 0, Math.PI * 2);
+    context.fill();
+
+    context.fillStyle = "rgba(0,0,0,0.22)";
+    context.beginPath();
+    context.ellipse(frame.width * 0.52, frame.height * 0.76, frame.width * 0.34, frame.height * 0.09, 0, 0, Math.PI * 2);
+    context.fill();
   }
 </script>
 
@@ -498,9 +567,9 @@
             <section class="flex h-full min-h-0 flex-col">
               <div class="flex h-10 shrink-0 items-center justify-between border-b bg-card px-3">
                 <div class="flex items-center gap-1">
-                  <Button variant="secondary" size="sm">
+                  <Button variant="secondary" size="sm" disabled={isRendering} onclick={refreshPreviewFrame}>
                     <PlayIcon data-icon="inline-start" />
-                    Preview
+                    {isRendering ? "Rendering" : "Preview"}
                   </Button>
                   <Button variant="ghost" size="icon-sm" title="Viewport overlays" aria-label="Viewport overlays">
                     <Grid3X3Icon data-icon="inline-start" />
@@ -518,28 +587,34 @@
               <div class="relative min-h-0 flex-1 overflow-hidden bg-[#121514]">
                 <div class="absolute inset-0 opacity-45 [background-image:linear-gradient(rgba(255,255,255,.05)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.05)_1px,transparent_1px)] [background-size:32px_32px]"></div>
                 <div class="absolute inset-x-8 bottom-0 h-1/3 bg-[radial-gradient(ellipse_at_center,rgba(0,0,0,.45),transparent_68%)]"></div>
-                <div class="absolute left-1/2 top-1/2 aspect-[1.45] w-[min(68vw,760px)] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/10 bg-[linear-gradient(135deg,rgba(255,255,255,.12),rgba(255,255,255,.02))] shadow-2xl">
-                  {#if selectedMaterial?.thumbnailUrl}
-                    <img
-                      src={selectedMaterial.thumbnailUrl}
-                      alt=""
-                      class="absolute inset-0 size-full rounded-md object-cover opacity-70 mix-blend-overlay"
-                    />
+                <div class="absolute left-1/2 top-1/2 aspect-[18/13] w-[min(68vw,760px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md border border-white/10 bg-black shadow-2xl">
+                  <canvas
+                    bind:this={previewCanvas}
+                    width={previewFrame?.width ?? 360}
+                    height={previewFrame?.height ?? 260}
+                    class="absolute inset-0 size-full object-cover"
+                    aria-label="Lupin rendered preview"
+                  ></canvas>
+                  {#if isRendering}
+                    <div class="absolute inset-0 grid place-items-center bg-black/35 text-xs font-medium uppercase text-white/70 backdrop-blur-sm">
+                      Rendering Lupin preview
+                    </div>
                   {/if}
-                  <div class="absolute inset-0 rounded-md bg-[radial-gradient(circle_at_45%_25%,rgba(255,255,255,.24),transparent_24%),linear-gradient(160deg,rgba(255,255,255,.2),rgba(255,255,255,.02)_42%,rgba(0,0,0,.36))]"></div>
                   <div class="absolute bottom-5 left-5 right-5 flex items-end justify-between gap-4 text-white">
                     <div class="min-w-0">
-                      <div class="text-[0.7rem] uppercase text-white/55">Selected material</div>
-                      <div class="truncate text-2xl font-semibold">{selectedMaterial?.name ?? "No material selected"}</div>
+                      <div class="text-[0.7rem] uppercase text-white/55">Lupin preview</div>
+                      <div class="truncate text-2xl font-semibold">
+                        {previewFrame?.materialName ?? selectedMaterial?.name ?? "Cornell material study"}
+                      </div>
                     </div>
                     <div class="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-right text-xs text-white/70 backdrop-blur">
-                      <div>{selectedFiles.length} maps</div>
-                      <div>{resolution.toUpperCase()} source</div>
+                      <div>{previewFrame?.samples ?? 0} samples</div>
+                      <div>{previewFrame?.width ?? 360} x {previewFrame?.height ?? 260}</div>
                     </div>
                   </div>
                 </div>
                 <div class="absolute left-6 top-6 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 backdrop-blur">
-                  1920 x 1080 · ACES · interactive preview
+                  RGBA8 readback · ACES · interactive preview
                 </div>
                 <div class="absolute bottom-6 right-6 flex items-center gap-2 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 backdrop-blur">
                   <CircleDotDashedIcon class="size-4 text-emerald-300" />

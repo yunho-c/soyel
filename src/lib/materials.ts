@@ -78,6 +78,15 @@ export type DownloadedMaterial = {
   }>;
 };
 
+export type RenderPreviewFrame = {
+  width: number;
+  height: number;
+  samples: number;
+  surfaceLabel: string;
+  materialName?: string;
+  pixels: number[];
+};
+
 const mockFiles: MaterialFile[] = [
   {
     map: "diff",
@@ -169,6 +178,15 @@ const mockStatus: RendererStatus = {
   ],
 };
 
+const mockPreviewFrame: RenderPreviewFrame = {
+  width: 360,
+  height: 260,
+  samples: 6,
+  surfaceLabel: "Chair Shell",
+  materialName: "Brick Floor 003",
+  pixels: [],
+};
+
 function hasTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -242,6 +260,21 @@ export async function applyMaterialToSelection(material: MaterialApplication) {
   }
 
   return invoke<RendererStatus>("apply_material_to_selection", { material });
+}
+
+export async function renderPreviewFrame(args: { width?: number; height?: number; samples?: number }) {
+  if (!hasTauriRuntime()) {
+    return {
+      ...mockPreviewFrame,
+      width: args.width ?? mockPreviewFrame.width,
+      height: args.height ?? mockPreviewFrame.height,
+      surfaceLabel: mockStatus.selectedSurface.label,
+      materialName: mockStatus.appliedMaterials.find((item) => item.surfaceId === mockStatus.selectedSurface.id)
+        ?.materialName,
+    };
+  }
+
+  return invoke<RenderPreviewFrame>("render_preview_frame", args);
 }
 
 export async function downloadPolyHavenMaterial(id: string, resolution: string, roles: string[]) {

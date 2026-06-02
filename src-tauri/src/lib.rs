@@ -9,6 +9,9 @@ use serde_json::Value;
 
 const POLYHAVEN_API: &str = "https://api.polyhaven.com";
 const POLYHAVEN_USER_AGENT: &str = "soyel-renderer/0.1 (Poly Haven material discovery)";
+const PREVIEW_WIDTH: u32 = 360;
+const PREVIEW_HEIGHT: u32 = 260;
+const PREVIEW_SAMPLES: u32 = 6;
 
 #[derive(Debug)]
 struct AppState {
@@ -46,6 +49,17 @@ struct RendererStatus {
     selected_surface: SurfaceSelection,
     applied_materials: Vec<AppliedMaterial>,
     notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderPreviewFrame {
+    width: u32,
+    height: u32,
+    samples: u32,
+    surface_label: String,
+    material_name: Option<String>,
+    pixels: Vec<u8>,
 }
 
 impl RendererStatus {
@@ -276,6 +290,44 @@ fn apply_material_to_selection(
 }
 
 #[tauri::command]
+fn render_preview_frame(
+    state: tauri::State<'_, AppState>,
+    width: Option<u32>,
+    height: Option<u32>,
+    samples: Option<u32>,
+) -> Result<RenderPreviewFrame, String> {
+    let (surface_id, surface_label, material_name) = {
+        let session = state
+            .renderer
+            .lock()
+            .map_err(|_| "renderer session lock poisoned".to_string())?;
+        let surface = session.selected_surface.clone();
+        let applied = session
+            .applied_materials
+            .get(&surface.id)
+            .map(|material| material.material_name.clone());
+
+        (surface.id, surface.label, applied)
+    };
+
+    let width = width.unwrap_or(PREVIEW_WIDTH).clamp(160, 960);
+    let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
+    let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
+
+    let pixels = render_lupin_preview(width, height, samples, material_name.as_deref())
+        .map_err(|error| format!("Lupin preview render failed for {surface_id}: {error}"))?;
+
+    Ok(RenderPreviewFrame {
+        width,
+        height,
+        samples,
+        surface_label,
+        material_name,
+        pixels,
+    })
+}
+
+#[tauri::command]
 async fn polyhaven_search_materials(
     state: tauri::State<'_, AppState>,
     query: Option<String>,
@@ -333,6 +385,338 @@ async fn polyhaven_search_materials(
 
     materials.truncate(limit.unwrap_or(48).clamp(1, 200));
     Ok(materials)
+}
+
+fn render_lupin_preview(
+    width: u32,
+    height: u32,
+    samples: u32,
+    material_name: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    use lupin_pt::wgpu;
+
+    let (device, queue, _) = lupin_pt::init_default_wgpu_context_no_window();
+    let pathtrace_resources = lupin_pt::build_pathtrace_resources(
+        &device,
+        &lupin_pt::BakedPathtraceParams {
+            with_runtime_checks: false,
+            max_bounces: 4,
+            samples_per_pixel: 1,
+        },
+    );
+    let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
+    let (scene, camera_params, camera_transform) =
+        build_soyel_preview_scene(&device, &queue, material_name, width as f32 / height as f32);
+
+    let mut output = lupin_pt::DoubleBufferedTexture::create(
+        &device,
+        &wgpu::TextureDescriptor {
+            label: Some("Soyel Lupin preview HDR output"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        },
+    );
+
+    for accum_counter in 0..samples {
+        lupin_pt::pathtrace_scene(
+            &device,
+            &queue,
+            &pathtrace_resources,
+            &scene,
+            output.front(),
+            Default::default(),
+            &lupin_pt::PathtraceDesc {
+                accum_params: Some(lupin_pt::AccumulationParams {
+                    prev_frame: output.back(),
+                    accum_counter,
+                }),
+                tile_params: None,
+                camera_params,
+                camera_transform,
+                force_software_bvh: true,
+                advanced: lupin_pt::AdvancedParams {
+                    max_radiance: 12.0,
+                    ..Default::default()
+                },
+            },
+        );
+        output.flip();
+    }
+    output.flip();
+
+    let tonemapped = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Soyel Lupin preview RGBA output"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    lupin_pt::tonemap_and_fit_aspect(
+        &device,
+        &queue,
+        &tonemap_resources,
+        output.front(),
+        &tonemapped,
+        &lupin_pt::TonemapDesc {
+            viewport: None,
+            exposure: 0.0,
+            filmic: true,
+            srgb: true,
+            clear: true,
+        },
+    );
+
+    read_rgba8_texture(&device, &queue, &tonemapped, width, height)
+}
+
+fn build_soyel_preview_scene(
+    device: &lupin_pt::wgpu::Device,
+    queue: &lupin_pt::wgpu::Queue,
+    material_name: Option<&str>,
+    aspect: f32,
+) -> (lupin_pt::Scene, lupin_pt::CameraParams, lupin_pt::Mat3x4) {
+    let mut scene = lupin_pt::SceneCPU::default();
+
+    let floor_mat =
+        push_preview_material(&mut scene, preview_material(0.56, 0.55, 0.50, 0.82, 0.0));
+    let wall_mat = push_preview_material(&mut scene, preview_material(0.36, 0.40, 0.37, 0.68, 0.0));
+    let accent = material_preview_color(material_name);
+    let swatch_mat = push_preview_material(
+        &mut scene,
+        preview_material(accent.x, accent.y, accent.z, 0.46, 0.08),
+    );
+    let light_mat = push_preview_material(&mut scene, {
+        let mut material = lupin_pt::Material::default();
+        material.emission = lupin_pt::Vec4 {
+            x: 16.0,
+            y: 13.0,
+            z: 8.0,
+            w: 0.0,
+        };
+        material
+    });
+
+    push_preview_quad(
+        &mut scene,
+        [
+            lupin_pt::Vec4::new3(-1.35, 0.0, -1.15),
+            lupin_pt::Vec4::new3(1.35, 0.0, -1.15),
+            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
+            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
+        ],
+        floor_mat,
+    );
+    push_preview_quad(
+        &mut scene,
+        [
+            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
+            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
+            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
+            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
+        ],
+        wall_mat,
+    );
+    push_preview_quad(
+        &mut scene,
+        [
+            lupin_pt::Vec4::new3(-0.48, 0.28, 0.23),
+            lupin_pt::Vec4::new3(0.52, 0.20, 0.07),
+            lupin_pt::Vec4::new3(0.45, 1.08, -0.08),
+            lupin_pt::Vec4::new3(-0.55, 1.00, 0.08),
+        ],
+        swatch_mat,
+    );
+    push_preview_quad(
+        &mut scene,
+        [
+            lupin_pt::Vec4::new3(-0.34, 1.86, 0.14),
+            lupin_pt::Vec4::new3(0.34, 1.86, 0.14),
+            lupin_pt::Vec4::new3(0.34, 1.86, -0.42),
+            lupin_pt::Vec4::new3(-0.34, 1.86, -0.42),
+        ],
+        light_mat,
+    );
+
+    lupin_pt::validate_scene(&scene, 0, 0);
+    let gpu_scene = lupin_pt::build_accel_structures_and_upload(
+        device,
+        queue,
+        &scene,
+        vec![],
+        vec![],
+        vec![],
+        &[],
+        true,
+    );
+
+    let camera_params = lupin_pt::CameraParams {
+        is_orthographic: false,
+        lens: 0.043,
+        aperture: 0.0,
+        focus: 3.2,
+        film: 0.032,
+        aspect,
+    };
+    let camera_transform = lupin_pt::Mat3x4 {
+        m: [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.96, 0.28],
+            [0.0, -0.28, 0.96],
+            [0.0, 0.92, -3.05],
+        ],
+    };
+
+    (gpu_scene, camera_params, camera_transform)
+}
+
+fn push_preview_material(scene: &mut lupin_pt::SceneCPU, material: lupin_pt::Material) -> u32 {
+    let index = scene.materials.len() as u32;
+    scene.materials.push(material);
+    index
+}
+
+fn push_preview_quad(scene: &mut lupin_pt::SceneCPU, verts: [lupin_pt::Vec4; 4], mat_idx: u32) {
+    let mesh_idx = scene.mesh_infos.len() as u32;
+    scene.mesh_infos.push(lupin_pt::MeshInfo::default());
+    scene.verts_pos_array.push(verts.to_vec());
+    scene.indices_array.push(vec![0, 1, 2, 2, 3, 0]);
+    scene.instances.push(lupin_pt::Instance {
+        mesh_idx,
+        mat_idx,
+        ..Default::default()
+    });
+}
+
+fn preview_material(r: f32, g: f32, b: f32, roughness: f32, metallic: f32) -> lupin_pt::Material {
+    let mut material = lupin_pt::Material::default();
+    material.color = lupin_pt::Vec4 {
+        x: r,
+        y: g,
+        z: b,
+        w: 1.0,
+    };
+    material.mat_type = lupin_pt::MaterialType::GltfPbr;
+    material.roughness = roughness;
+    material.metallic = metallic;
+    material
+}
+
+fn material_preview_color(material_name: Option<&str>) -> lupin_pt::Vec4 {
+    let Some(name) = material_name.filter(|value| !value.is_empty()) else {
+        return lupin_pt::Vec4 {
+            x: 0.68,
+            y: 0.73,
+            z: 0.70,
+            w: 1.0,
+        };
+    };
+
+    let mut hash = 0u32;
+    for byte in name.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(byte as u32);
+    }
+
+    let red = 0.38 + ((hash & 0xff) as f32 / 255.0) * 0.34;
+    let green = 0.34 + (((hash >> 8) & 0xff) as f32 / 255.0) * 0.34;
+    let blue = 0.32 + (((hash >> 16) & 0xff) as f32 / 255.0) * 0.34;
+
+    lupin_pt::Vec4 {
+        x: red,
+        y: green,
+        z: blue,
+        w: 1.0,
+    }
+}
+
+fn read_rgba8_texture(
+    device: &lupin_pt::wgpu::Device,
+    queue: &lupin_pt::wgpu::Queue,
+    texture: &lupin_pt::wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    use lupin_pt::wgpu;
+
+    let bytes_per_pixel = 4usize;
+    let unpadded_bytes_per_row = bytes_per_pixel * width as usize;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+    let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Soyel Lupin preview readback"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Soyel Lupin preview readback encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row as u32),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    {
+        let buffer_slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| format!("GPU readback poll failed: {error}"))?;
+        rx.recv()
+            .map_err(|error| format!("GPU readback channel failed: {error}"))?
+            .map_err(|error| format!("GPU readback mapping failed: {error}"))?;
+    }
+
+    let view = buffer.slice(..).get_mapped_range();
+    let mut pixels = Vec::with_capacity(unpadded_bytes_per_row * height as usize);
+    for row in view.chunks(padded_bytes_per_row).take(height as usize) {
+        pixels.extend_from_slice(&row[..unpadded_bytes_per_row]);
+    }
+    drop(view);
+    buffer.unmap();
+
+    Ok(pixels)
 }
 
 #[tauri::command]
@@ -667,6 +1051,7 @@ pub fn run() {
             renderer_status,
             select_scene_surface,
             apply_material_to_selection,
+            render_preview_frame,
             polyhaven_search_materials,
             polyhaven_material_files,
             download_polyhaven_material,
