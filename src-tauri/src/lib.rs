@@ -130,6 +130,23 @@ struct AppliedMaterial {
     maps: Vec<MaterialFile>,
 }
 
+#[derive(Debug, Clone)]
+struct PreviewMaterial {
+    name: String,
+    categories: Vec<String>,
+    maps: Vec<MaterialFile>,
+}
+
+impl From<&AppliedMaterial> for PreviewMaterial {
+    fn from(material: &AppliedMaterial) -> Self {
+        Self {
+            name: material.material_name.clone(),
+            categories: material.categories.clone(),
+            maps: material.maps.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PolyHavenAsset {
     name: String,
@@ -304,7 +321,7 @@ fn render_preview_frame(
     height: Option<u32>,
     samples: Option<u32>,
 ) -> Result<RenderPreviewFrame, String> {
-    let (surface_id, surface_label, material_name) = {
+    let (surface_id, surface_label, material) = {
         let session = state
             .renderer
             .lock()
@@ -313,7 +330,7 @@ fn render_preview_frame(
         let applied = session
             .applied_materials
             .get(&surface.id)
-            .map(|material| material.material_name.clone());
+            .map(PreviewMaterial::from);
 
         (surface.id, surface.label, applied)
     };
@@ -322,8 +339,9 @@ fn render_preview_frame(
     let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
     let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
 
-    let pixels = render_lupin_preview(width, height, samples, material_name.as_deref())
+    let pixels = render_lupin_preview(width, height, samples, material.as_ref())
         .map_err(|error| format!("Lupin preview render failed for {surface_id}: {error}"))?;
+    let material_name = material.map(|material| material.name);
 
     Ok(RenderPreviewFrame {
         width,
@@ -418,7 +436,7 @@ fn render_lupin_preview(
     width: u32,
     height: u32,
     samples: u32,
-    material_name: Option<&str>,
+    material: Option<&PreviewMaterial>,
 ) -> Result<Vec<u8>, String> {
     use lupin_pt::wgpu;
 
@@ -433,7 +451,7 @@ fn render_lupin_preview(
     );
     let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
     let (scene, camera_params, camera_transform) =
-        build_soyel_preview_scene(&device, &queue, material_name, width as f32 / height as f32);
+        build_soyel_preview_scene(&device, &queue, material, width as f32 / height as f32);
 
     let mut output = lupin_pt::DoubleBufferedTexture::create(
         &device,
@@ -522,7 +540,7 @@ fn render_lupin_preview(
 fn build_soyel_preview_scene(
     device: &lupin_pt::wgpu::Device,
     queue: &lupin_pt::wgpu::Queue,
-    material_name: Option<&str>,
+    material: Option<&PreviewMaterial>,
     aspect: f32,
 ) -> (lupin_pt::Scene, lupin_pt::CameraParams, lupin_pt::Mat3x4) {
     let mut scene = lupin_pt::SceneCPU::default();
@@ -530,11 +548,7 @@ fn build_soyel_preview_scene(
     let floor_mat =
         push_preview_material(&mut scene, preview_material(0.56, 0.55, 0.50, 0.82, 0.0));
     let wall_mat = push_preview_material(&mut scene, preview_material(0.36, 0.40, 0.37, 0.68, 0.0));
-    let accent = material_preview_color(material_name);
-    let swatch_mat = push_preview_material(
-        &mut scene,
-        preview_material(accent.x, accent.y, accent.z, 0.46, 0.08),
-    );
+    let swatch_mat = push_preview_material(&mut scene, preview_material_from_polyhaven(material));
     let light_mat = push_preview_material(&mut scene, {
         let mut material = lupin_pt::Material::default();
         material.emission = lupin_pt::Vec4 {
@@ -649,6 +663,61 @@ fn preview_material(r: f32, g: f32, b: f32, roughness: f32, metallic: f32) -> lu
     material.roughness = roughness;
     material.metallic = metallic;
     material
+}
+
+fn preview_material_from_polyhaven(material: Option<&PreviewMaterial>) -> lupin_pt::Material {
+    let accent = material_preview_color(material.map(|material| material.name.as_str()));
+    let roughness = material.map(polyhaven_preview_roughness).unwrap_or(0.46);
+    let metallic = material.map(polyhaven_preview_metallic).unwrap_or(0.08);
+
+    preview_material(accent.x, accent.y, accent.z, roughness, metallic)
+}
+
+fn polyhaven_preview_roughness(material: &PreviewMaterial) -> f32 {
+    let mut roughness = if material_has_category(material, "fabric")
+        || material_has_category(material, "brick")
+        || material_has_category(material, "rock")
+        || material_has_category(material, "terrain")
+    {
+        0.82
+    } else if material_has_category(material, "wood") {
+        0.62
+    } else if material_has_category(material, "metal") {
+        0.34
+    } else {
+        0.56
+    };
+
+    if material_has_role(material, "normal") || material_has_role(material, "displacement") {
+        roughness = (roughness + 0.08_f32).min(0.92_f32);
+    }
+
+    if material_has_role(material, "roughness")
+        || material_has_role(material, "occlusionRoughnessMetallic")
+    {
+        roughness
+    } else {
+        (roughness + 0.46) * 0.5
+    }
+}
+
+fn polyhaven_preview_metallic(material: &PreviewMaterial) -> f32 {
+    if material_has_role(material, "metallic") || material_has_category(material, "metal") {
+        0.78
+    } else {
+        0.04
+    }
+}
+
+fn material_has_role(material: &PreviewMaterial, role: &str) -> bool {
+    material.maps.iter().any(|map| map.role == role)
+}
+
+fn material_has_category(material: &PreviewMaterial, category: &str) -> bool {
+    material
+        .categories
+        .iter()
+        .any(|value| value.to_lowercase().contains(category))
 }
 
 fn material_preview_color(material_name: Option<&str>) -> lupin_pt::Vec4 {
