@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::PathBuf,
+    panic::{self, AssertUnwindSafe},
     sync::Mutex,
 };
 
@@ -339,8 +340,16 @@ fn render_preview_frame(
     let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
     let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
 
-    let pixels = render_lupin_preview(width, height, samples, material.as_ref())
-        .map_err(|error| format!("Lupin preview render failed for {surface_id}: {error}"))?;
+    let pixels = panic::catch_unwind(AssertUnwindSafe(|| {
+        render_lupin_preview(width, height, samples, material.as_ref())
+    }))
+    .map_err(|payload| {
+        format!(
+            "Lupin preview render crashed for {surface_id}: {}",
+            panic_payload_to_string(payload.as_ref())
+        )
+    })?
+    .map_err(|error| format!("Lupin preview render failed for {surface_id}: {error}"))?;
     let material_name = material.map(|material| material.name);
 
     Ok(RenderPreviewFrame {
@@ -351,6 +360,18 @@ fn render_preview_frame(
         material_name,
         pixels,
     })
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+
+    "unknown panic".to_string()
 }
 
 #[tauri::command]
@@ -439,6 +460,8 @@ fn render_lupin_preview(
     material: Option<&PreviewMaterial>,
 ) -> Result<Vec<u8>, String> {
     use lupin_pt::wgpu;
+
+    ensure_lupin_preview_supported()?;
 
     let (device, queue, _) = lupin_pt::init_default_wgpu_context_no_window();
     let pathtrace_resources = lupin_pt::build_pathtrace_resources(
@@ -535,6 +558,61 @@ fn render_lupin_preview(
     );
 
     read_rgba8_texture(&device, &queue, &tonemapped, width, height)
+}
+
+fn ensure_lupin_preview_supported() -> Result<(), String> {
+    use lupin_pt::wgpu;
+
+    let instance = wgpu::Instance::new(&default_wgpu_instance_descriptor());
+    let adapter_options = wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::default(),
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    };
+    let adapter = lupin_pt::wait_for(instance.request_adapter(&adapter_options))
+        .map_err(|error| format!("failed to get WGPU adapter: {error}"))?;
+    let required_features = lupin_required_features();
+    let missing_features = required_features.difference(adapter.features());
+
+    if missing_features.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "WGPU adapter {:?} does not support required Lupin features: {missing_features:?}",
+        adapter.get_info().name
+    ))
+}
+
+fn default_wgpu_instance_descriptor() -> lupin_pt::wgpu::InstanceDescriptor {
+    let mut desc = lupin_pt::wgpu::InstanceDescriptor::default();
+
+    #[cfg(target_os = "windows")]
+    {
+        desc.backends = lupin_pt::wgpu::Backends::VULKAN;
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
+    {
+        desc.backends = lupin_pt::wgpu::Backends::PRIMARY;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        desc.backends = lupin_pt::wgpu::Backends::GL;
+    }
+
+    desc
+}
+
+fn lupin_required_features() -> lupin_pt::wgpu::Features {
+    lupin_pt::wgpu::Features::TEXTURE_BINDING_ARRAY
+        | lupin_pt::wgpu::Features::BUFFER_BINDING_ARRAY
+        | lupin_pt::wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
+        | lupin_pt::wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | lupin_pt::wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
+        | lupin_pt::wgpu::Features::IMMEDIATES
+        | lupin_pt::wgpu::Features::SHADER_INT64
 }
 
 fn build_soyel_preview_scene(
