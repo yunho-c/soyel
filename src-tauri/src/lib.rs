@@ -728,7 +728,7 @@ fn preview_camera_for_request(
         };
         let camera_transform = lupin_pt::Mat3x4 {
             m: [
-                [1.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0],
                 [0.0, 0.96, 0.28],
                 [0.0, -0.28, 0.96],
                 [0.0, 0.92, -3.05],
@@ -749,12 +749,12 @@ fn preview_camera_for_request(
     }
 
     let forward = normalize3(direction);
-    let right = normalize3(cross3(camera.up, forward));
+    let right = normalize3(cross3(forward, camera.up));
     if length3(right) < 0.001 {
         return fallback();
     }
 
-    let true_up = normalize3(cross3(forward, right));
+    let true_up = normalize3(cross3(right, forward));
     let fov_degrees = if camera.fov_degrees.is_finite() {
         camera.fov_degrees.clamp(18.0, 80.0)
     } else {
@@ -1006,9 +1006,14 @@ mod tests {
             transform.m[2]
         );
         assert!(
-            transform.m[0][0] > 0.9,
-            "camera right axis should preserve a right-handed +X screen basis, got {:?}",
+            transform.m[0][0] < -0.9,
+            "Lupin camera right axis should match Three's screen-right basis, got {:?}",
             transform.m[0]
+        );
+        assert!(
+            transform.m[1][1] > 0.9,
+            "Lupin camera up axis should preserve Three's pitch direction, got {:?}",
+            transform.m[1]
         );
     }
 
