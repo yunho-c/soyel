@@ -17,6 +17,7 @@
     appliedMaterials?: AppliedMaterial[];
     isRendering?: boolean;
     isPathTraceStale?: boolean;
+    rasterFillOpacity?: number;
     onCameraChange?: (camera: CameraState, active: boolean) => void;
     onInteractionChange?: (active: boolean) => void;
     onSelectSurface?: (id: string, label: string) => void;
@@ -35,6 +36,7 @@
     appliedMaterials = [],
     isRendering = false,
     isPathTraceStale = false,
+    rasterFillOpacity = 1,
     onCameraChange,
     onInteractionChange,
     onSelectSurface,
@@ -213,6 +215,8 @@
 
   function updateObjectPresentation() {
     const appliedBySurface = new Map(appliedMaterials.map((material) => [material.surfaceId, material]));
+    const fillOpacity = clamp01(rasterFillOpacity);
+    const materialWrites = fillOpacity > 0.01;
 
     for (const [id, record] of meshRecords) {
       const applied = appliedBySurface.get(id);
@@ -222,12 +226,18 @@
 
       record.material.color.set(baseColor);
       record.material.emissive.set(hovered ? "#18251d" : "#000000");
-      record.material.opacity = selected ? 0.95 : 0.76;
+      record.material.opacity = (selected ? 0.95 : 0.76) * fillOpacity;
+      record.material.colorWrite = materialWrites;
+      record.material.depthWrite = materialWrites;
       record.material.metalness = id === "aluminum-base" ? 0.42 : 0.04;
       record.material.roughness = id === "control-dial" ? 0.28 : 0.72;
       record.outline.visible = selected || hovered;
       record.outlineMaterial.color.set(selected ? "#7ff0b2" : "#f6d16b");
     }
+  }
+
+  function clamp01(value: number) {
+    return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 1));
   }
 
   function createObjectRecord(object: ViewportObject) {

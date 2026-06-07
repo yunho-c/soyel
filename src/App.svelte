@@ -86,6 +86,10 @@
   let errorMessage = $state("");
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
+  let hasPathTracedPixels = $derived(
+    previewFrame ? previewFrame.pixels.length === previewFrame.width * previewFrame.height * 4 : false,
+  );
+  let rasterFillOpacity = $derived(pathTraceStale || isViewportInteracting || !hasPathTracedPixels ? 1 : 0);
 
   const activities = [
     { id: "scene", label: "Scene", icon: FolderTreeIcon },
@@ -674,6 +678,7 @@
                     appliedMaterials={status?.appliedMaterials ?? []}
                     isRendering={isRendering}
                     isPathTraceStale={pathTraceStale || isViewportInteracting}
+                    rasterFillOpacity={rasterFillOpacity}
                     onCameraChange={handleViewportCameraChange}
                     onInteractionChange={handleViewportInteractionChange}
                     onSelectSurface={selectSurface}
