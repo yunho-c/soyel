@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    path::PathBuf,
     panic::{self, AssertUnwindSafe},
+    path::PathBuf,
     sync::Mutex,
 };
 
@@ -571,15 +571,14 @@ fn ensure_lupin_preview_supported() -> Result<(), String> {
     };
     let adapter = lupin_pt::wait_for(instance.request_adapter(&adapter_options))
         .map_err(|error| format!("failed to get WGPU adapter: {error}"))?;
-    let required_features = lupin_required_features();
-    let missing_features = required_features.difference(adapter.features());
-
-    if missing_features.is_empty() {
+    if lupin_pt::supports_buffer_binding_arrays(&adapter)
+        || lupin_pt::supports_packed_wgpu_path(&adapter)
+    {
         return Ok(());
     }
 
     Err(format!(
-        "WGPU adapter {:?} does not support required Lupin features: {missing_features:?}",
+        "WGPU adapter {:?} supports neither Lupin's legacy buffer-binding-array path nor its packed software-BVH path",
         adapter.get_info().name
     ))
 }
@@ -603,16 +602,6 @@ fn default_wgpu_instance_descriptor() -> lupin_pt::wgpu::InstanceDescriptor {
     }
 
     desc
-}
-
-fn lupin_required_features() -> lupin_pt::wgpu::Features {
-    lupin_pt::wgpu::Features::TEXTURE_BINDING_ARRAY
-        | lupin_pt::wgpu::Features::BUFFER_BINDING_ARRAY
-        | lupin_pt::wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
-        | lupin_pt::wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-        | lupin_pt::wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
-        | lupin_pt::wgpu::Features::IMMEDIATES
-        | lupin_pt::wgpu::Features::SHADER_INT64
 }
 
 fn build_soyel_preview_scene(
