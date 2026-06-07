@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import BoxIcon from "lucide-svelte/icons/box";
   import BracesIcon from "lucide-svelte/icons/braces";
   import CheckIcon from "lucide-svelte/icons/check";
@@ -25,12 +25,14 @@
   import PanelRightOpenIcon from "lucide-svelte/icons/panel-right-open";
   import PlayIcon from "lucide-svelte/icons/play";
   import RefreshCwIcon from "lucide-svelte/icons/refresh-cw";
+  import RotateCcwIcon from "lucide-svelte/icons/rotate-ccw";
   import SearchIcon from "lucide-svelte/icons/search";
   import SlidersHorizontalIcon from "lucide-svelte/icons/sliders-horizontal";
   import SparklesIcon from "lucide-svelte/icons/sparkles";
   import TerminalIcon from "lucide-svelte/icons/terminal";
   import TimerIcon from "lucide-svelte/icons/timer";
 
+  import InteractiveViewport from "$lib/components/viewport/InteractiveViewport.svelte";
   import { Button } from "$lib/components/ui/button";
   import * as Resizable from "$lib/components/ui/resizable";
   import {
@@ -50,6 +52,12 @@
     type RendererStatus,
   } from "$lib/materials";
   import {
+    createDefaultViewportScene,
+    defaultCameraState,
+    withSceneRevision,
+    type CameraState,
+  } from "$lib/viewport-scene";
+  import {
     loadWorkspaceLayout,
     saveWorkspaceLayout,
     type WorkspaceActivity,
@@ -58,6 +66,7 @@
 
   let layout = $state(loadWorkspaceLayout());
   let status = $state<RendererStatus | null>(null);
+  let viewportScene = $state(createDefaultViewportScene());
   let materials = $state<PolyHavenMaterial[]>([]);
   let materialCategories = $state<PolyHavenCategory[]>([{ id: "all", name: "All", count: 0 }]);
   let selectedMaterial = $state<PolyHavenMaterial | null>(null);
@@ -72,7 +81,11 @@
   let isLoading = $state(false);
   let isApplying = $state(false);
   let isRendering = $state(false);
+  let isViewportInteracting = $state(false);
+  let pathTraceStale = $state(true);
   let errorMessage = $state("");
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  let activePreviewRevision = 0;
 
   const activities = [
     { id: "scene", label: "Scene", icon: FolderTreeIcon },
@@ -128,7 +141,13 @@
     await refreshStatus();
     await loadCategories();
     await loadMaterials();
-    await refreshPreviewFrame();
+    await refreshPreviewFrame(viewportScene.revision);
+  });
+
+  onDestroy(() => {
+    if (previewTimer) {
+      clearTimeout(previewTimer);
+    }
   });
 
   function updateLayout(next: Partial<typeof layout>) {
@@ -217,7 +236,8 @@
   async function selectSurface(id: string, label: string) {
     try {
       status = await selectSceneSurface(id, label);
-      await refreshPreviewFrame();
+      viewportScene = withSceneRevision(viewportScene, { selection: id });
+      schedulePreviewFrame(80);
     } catch (error) {
       errorMessage = String(error);
     }
@@ -240,7 +260,7 @@
         authors: selectedMaterial.authors,
         maps: selectedFiles,
       });
-      await refreshPreviewFrame();
+      schedulePreviewFrame(80);
     } catch (error) {
       errorMessage = String(error);
     } finally {
@@ -303,21 +323,63 @@
     return status?.appliedMaterials.find((material) => material.surfaceId === surfaceId);
   }
 
-  async function refreshPreviewFrame() {
+  function schedulePreviewFrame(delayMs = 180) {
+    if (previewTimer) {
+      clearTimeout(previewTimer);
+    }
+
+    pathTraceStale = true;
+    const revision = viewportScene.revision;
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      void refreshPreviewFrame(revision);
+    }, delayMs);
+  }
+
+  async function refreshPreviewFrame(revision = viewportScene.revision) {
     isRendering = true;
     errorMessage = "";
+    pathTraceStale = true;
+    activePreviewRevision = revision;
 
     try {
-      previewFrame = await renderPreviewFrame({
+      const frame = await renderPreviewFrame({
+        revision,
         width: 360,
         height: 260,
         samples: 6,
+        camera: viewportScene.camera,
       });
+
+      if (frame.revision === viewportScene.revision) {
+        previewFrame = frame;
+        pathTraceStale = false;
+      }
     } catch (error) {
       errorMessage = String(error);
     } finally {
-      isRendering = false;
+      if (activePreviewRevision === revision) {
+        isRendering = false;
+      }
     }
+  }
+
+  function handleViewportCameraChange(camera: CameraState, active: boolean) {
+    viewportScene = withSceneRevision(viewportScene, { camera });
+    pathTraceStale = true;
+    schedulePreviewFrame(active ? 320 : 120);
+  }
+
+  function handleViewportInteractionChange(active: boolean) {
+    isViewportInteracting = active;
+    if (active) {
+      pathTraceStale = true;
+    }
+  }
+
+  function resetViewportCamera() {
+    viewportScene = withSceneRevision(viewportScene, { camera: { ...defaultCameraState } });
+    schedulePreviewFrame(0);
   }
 
   function paintPreviewFrame(canvas: HTMLCanvasElement, frame: RenderPreviewFrame) {
@@ -574,9 +636,12 @@
             <section class="flex h-full min-h-0 flex-col">
               <div class="flex h-10 shrink-0 items-center justify-between border-b bg-card px-3">
                 <div class="flex items-center gap-1">
-                  <Button variant="secondary" size="sm" disabled={isRendering} onclick={refreshPreviewFrame}>
+                  <Button variant="secondary" size="sm" disabled={isRendering} onclick={() => refreshPreviewFrame()}>
                     <PlayIcon data-icon="inline-start" />
                     {isRendering ? "Rendering" : "Preview"}
+                  </Button>
+                  <Button variant="ghost" size="icon-sm" title="Reset camera" aria-label="Reset camera" onclick={resetViewportCamera}>
+                    <RotateCcwIcon data-icon="inline-start" />
                   </Button>
                   <Button variant="ghost" size="icon-sm" title="Viewport overlays" aria-label="Viewport overlays">
                     <Grid3X3Icon data-icon="inline-start" />
@@ -599,17 +664,23 @@
                     bind:this={previewCanvas}
                     width={previewFrame?.width ?? 360}
                     height={previewFrame?.height ?? 260}
-                    class="absolute inset-0 size-full object-cover"
+                    class="absolute inset-0 size-full object-cover transition-opacity duration-200"
+                    class:opacity-55={pathTraceStale || isViewportInteracting}
                     aria-label="Lupin rendered preview"
                   ></canvas>
-                  {#if isRendering}
-                    <div class="absolute inset-0 grid place-items-center bg-black/35 text-xs font-medium uppercase text-white/70 backdrop-blur-sm">
-                      Rendering Lupin preview
-                    </div>
-                  {/if}
+                  <InteractiveViewport
+                    viewportScene={viewportScene}
+                    selectedSurfaceId={status?.selectedSurface.id}
+                    appliedMaterials={status?.appliedMaterials ?? []}
+                    isRendering={isRendering}
+                    isPathTraceStale={pathTraceStale || isViewportInteracting}
+                    onCameraChange={handleViewportCameraChange}
+                    onInteractionChange={handleViewportInteractionChange}
+                    onSelectSurface={selectSurface}
+                  />
                   <div class="absolute bottom-5 left-5 right-5 flex items-end justify-between gap-4 text-white">
                     <div class="min-w-0">
-                      <div class="text-[0.7rem] uppercase text-white/55">Lupin preview</div>
+                      <div class="text-[0.7rem] uppercase text-white/55">Hybrid viewport</div>
                       <div class="truncate text-2xl font-semibold">
                         {previewFrame?.materialName ?? selectedMaterial?.name ?? "Cornell material study"}
                       </div>

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { CameraState } from "$lib/viewport-scene";
+
 export type SurfaceSelection = {
   id: string;
   label: string;
@@ -85,12 +87,21 @@ export type DownloadedMaterial = {
 };
 
 export type RenderPreviewFrame = {
+  revision: number;
   width: number;
   height: number;
   samples: number;
   surfaceLabel: string;
   materialName?: string;
   pixels: number[];
+};
+
+export type RenderPreviewRequest = {
+  revision?: number;
+  width?: number;
+  height?: number;
+  samples?: number;
+  camera?: CameraState;
 };
 
 const mockFiles: MaterialFile[] = [
@@ -209,6 +220,7 @@ const mockStatus: RendererStatus = {
 };
 
 const mockPreviewFrame: RenderPreviewFrame = {
+  revision: 1,
   width: 360,
   height: 260,
   samples: 6,
@@ -300,10 +312,11 @@ export async function applyMaterialToSelection(material: MaterialApplication) {
   return invoke<RendererStatus>("apply_material_to_selection", { material });
 }
 
-export async function renderPreviewFrame(args: { width?: number; height?: number; samples?: number }) {
+export async function renderPreviewFrame(args: RenderPreviewRequest) {
   if (!hasTauriRuntime()) {
     return {
       ...mockPreviewFrame,
+      revision: args.revision ?? mockPreviewFrame.revision,
       width: args.width ?? mockPreviewFrame.width,
       height: args.height ?? mockPreviewFrame.height,
       surfaceLabel: mockStatus.selectedSurface.label,

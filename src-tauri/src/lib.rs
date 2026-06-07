@@ -55,12 +55,22 @@ struct RendererStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RenderPreviewFrame {
+    revision: u64,
     width: u32,
     height: u32,
     samples: u32,
     surface_label: String,
     material_name: Option<String>,
     pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewCamera {
+    position: [f32; 3],
+    target: [f32; 3],
+    up: [f32; 3],
+    fov_degrees: f32,
 }
 
 impl RendererStatus {
@@ -318,9 +328,11 @@ fn apply_material_to_selection(
 #[tauri::command]
 fn render_preview_frame(
     state: tauri::State<'_, AppState>,
+    revision: Option<u64>,
     width: Option<u32>,
     height: Option<u32>,
     samples: Option<u32>,
+    camera: Option<PreviewCamera>,
 ) -> Result<RenderPreviewFrame, String> {
     let (surface_id, surface_label, material) = {
         let session = state
@@ -341,7 +353,7 @@ fn render_preview_frame(
     let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
 
     let pixels = panic::catch_unwind(AssertUnwindSafe(|| {
-        render_lupin_preview(width, height, samples, material.as_ref())
+        render_lupin_preview(width, height, samples, material.as_ref(), camera.as_ref())
     }))
     .map_err(|payload| {
         format!(
@@ -353,6 +365,7 @@ fn render_preview_frame(
     let material_name = material.map(|material| material.name);
 
     Ok(RenderPreviewFrame {
+        revision: revision.unwrap_or_default(),
         width,
         height,
         samples,
@@ -458,6 +471,7 @@ fn render_lupin_preview(
     height: u32,
     samples: u32,
     material: Option<&PreviewMaterial>,
+    camera: Option<&PreviewCamera>,
 ) -> Result<Vec<u8>, String> {
     use lupin_pt::wgpu;
 
@@ -473,8 +487,13 @@ fn render_lupin_preview(
         },
     );
     let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
-    let (scene, camera_params, camera_transform) =
-        build_soyel_preview_scene(&device, &queue, material, width as f32 / height as f32);
+    let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
+        &device,
+        &queue,
+        material,
+        width as f32 / height as f32,
+        camera,
+    );
 
     let mut output = lupin_pt::DoubleBufferedTexture::create(
         &device,
@@ -609,6 +628,7 @@ fn build_soyel_preview_scene(
     queue: &lupin_pt::wgpu::Queue,
     material: Option<&PreviewMaterial>,
     aspect: f32,
+    camera: Option<&PreviewCamera>,
 ) -> (lupin_pt::Scene, lupin_pt::CameraParams, lupin_pt::Mat3x4) {
     let mut scene = lupin_pt::SceneCPU::default();
 
@@ -680,24 +700,108 @@ fn build_soyel_preview_scene(
         true,
     );
 
+    let (camera_params, camera_transform) = preview_camera_for_request(aspect, camera);
+
+    (gpu_scene, camera_params, camera_transform)
+}
+
+fn preview_camera_for_request(
+    aspect: f32,
+    camera: Option<&PreviewCamera>,
+) -> (lupin_pt::CameraParams, lupin_pt::Mat3x4) {
+    let fallback = || {
+        let camera_params = lupin_pt::CameraParams {
+            is_orthographic: false,
+            lens: 0.043,
+            aperture: 0.0,
+            focus: 3.2,
+            film: 0.032,
+            aspect,
+        };
+        let camera_transform = lupin_pt::Mat3x4 {
+            m: [
+                [1.0, 0.0, 0.0],
+                [0.0, 0.96, 0.28],
+                [0.0, -0.28, 0.96],
+                [0.0, 0.92, -3.05],
+            ],
+        };
+
+        (camera_params, camera_transform)
+    };
+
+    let Some(camera) = camera else {
+        return fallback();
+    };
+
+    let direction = sub3(camera.target, camera.position);
+    let focus = length3(direction);
+    if focus < 0.001 || !focus.is_finite() {
+        return fallback();
+    }
+
+    let forward = normalize3(direction);
+    let right = normalize3(cross3(forward, camera.up));
+    if length3(right) < 0.001 {
+        return fallback();
+    }
+
+    let true_up = normalize3(cross3(right, forward));
+    let fov_degrees = if camera.fov_degrees.is_finite() {
+        camera.fov_degrees.clamp(18.0, 80.0)
+    } else {
+        42.0
+    };
+    let film = 0.032;
+    let lens = film / (2.0 * (fov_degrees.to_radians() * 0.5).tan());
+
     let camera_params = lupin_pt::CameraParams {
         is_orthographic: false,
-        lens: 0.043,
+        lens,
         aperture: 0.0,
-        focus: 3.2,
-        film: 0.032,
+        focus,
+        film,
         aspect,
     };
     let camera_transform = lupin_pt::Mat3x4 {
         m: [
-            [1.0, 0.0, 0.0],
-            [0.0, 0.96, 0.28],
-            [0.0, -0.28, 0.96],
-            [0.0, 0.92, -3.05],
+            right,
+            true_up,
+            [-forward[0], -forward[1], -forward[2]],
+            camera.position,
         ],
     };
 
-    (gpu_scene, camera_params, camera_transform)
+    (camera_params, camera_transform)
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn length3(v: [f32; 3]) -> f32 {
+    dot3(v, v).sqrt()
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let length = length3(v);
+    if length < 0.001 || !length.is_finite() {
+        return [0.0, 0.0, 0.0];
+    }
+
+    [v[0] / length, v[1] / length, v[2] / length]
 }
 
 fn push_preview_material(scene: &mut lupin_pt::SceneCPU, material: lupin_pt::Material) -> u32 {
