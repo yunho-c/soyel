@@ -211,7 +211,7 @@ const mockStatus: RendererStatus = {
   engineVersion: "0.1.0",
   gpuApi: "wgpu path tracing",
   materialModel: "Lupin Yocto/GL material fields with glTF-PBR compatibility",
-  selectedSurface: { id: "chair-shell", label: "Chair Shell" },
+  selectedSurface: { id: "sample-block", label: "Sample Block" },
   appliedMaterials: [],
   notes: [
     "Browser preview mode is using local sample data.",

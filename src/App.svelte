@@ -140,10 +140,14 @@
   }>;
 
   const surfaces = [
-    { id: "chair-shell", label: "Chair Shell", meta: "Primary body", icon: CuboidIcon },
-    { id: "aluminum-base", label: "Aluminum Base", meta: "Support casting", icon: BoxIcon },
-    { id: "soft-grip", label: "Soft Grip", meta: "Overmold", icon: Layers3Icon },
-    { id: "control-dial", label: "Control Dial", meta: "Knurled insert", icon: CircleDotDashedIcon },
+    { id: "sample-block", label: "Sample Block", meta: "Material target", icon: CuboidIcon },
+    { id: "tall-block", label: "Tall Block", meta: "Reference object", icon: BoxIcon },
+    { id: "left-wall", label: "Left Wall", meta: "Red wall", icon: Layers3Icon },
+    { id: "right-wall", label: "Right Wall", meta: "Green wall", icon: Layers3Icon },
+    { id: "back-wall", label: "Back Wall", meta: "Diffuse wall", icon: Layers3Icon },
+    { id: "floor", label: "Floor", meta: "Diffuse floor", icon: Grid3X3Icon },
+    { id: "ceiling", label: "Ceiling", meta: "Diffuse ceiling", icon: Layers3Icon },
+    { id: "area-light", label: "Area Light", meta: "Emitter", icon: CircleDotDashedIcon },
   ];
 
   const roleLabels: Record<string, string> = {

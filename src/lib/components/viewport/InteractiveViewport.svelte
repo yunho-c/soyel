@@ -25,10 +25,14 @@
   };
 
   const defaultSurfaceColors: Record<string, string> = {
-    "chair-shell": "#a8b1aa",
-    "aluminum-base": "#767d7a",
-    "soft-grip": "#535f57",
-    "control-dial": "#ffe4a3",
+    "sample-block": "#a8b1aa",
+    "tall-block": "#818782",
+    "left-wall": "#a64a42",
+    "right-wall": "#4f8a5f",
+    "back-wall": "#b9b8ad",
+    floor: "#a9a89e",
+    ceiling: "#bab9ad",
+    "area-light": "#ffe4a3",
   };
 
   let {
@@ -240,8 +244,8 @@
       record.material.opacity = (selected ? 0.95 : 0.76) * fillOpacity;
       record.material.colorWrite = materialWrites;
       record.material.depthWrite = materialWrites;
-      record.material.metalness = id === "aluminum-base" ? 0.42 : 0.04;
-      record.material.roughness = id === "control-dial" ? 0.28 : 0.72;
+      record.material.metalness = 0.04;
+      record.material.roughness = id === "area-light" ? 0.28 : 0.72;
       record.outline.visible = selected || hovered;
       record.outlineMaterial.color.set(selected ? "#7ff0b2" : "#f6d16b");
     }
@@ -286,34 +290,56 @@
 
   function createProxyGeometry(meshId: ViewportObject["meshId"]) {
     switch (meshId) {
-      case "floor":
+      case "cornellFloor":
+      case "cornellCeiling":
         return new THREE.PlaneGeometry(2.7, 2.3);
-      case "wall":
+      case "cornellBackWall":
         return new THREE.PlaneGeometry(2.7, 1.9);
+      case "cornellLeftWall":
+      case "cornellRightWall":
+        return new THREE.PlaneGeometry(2.3, 1.9);
       case "light":
         return new THREE.PlaneGeometry(0.68, 0.56);
-      case "swatch":
+      case "tallBlock":
+        return new THREE.BoxGeometry(0.56, 1.1, 0.56);
+      case "shortBlock":
       default:
-        return new THREE.PlaneGeometry(1.03, 0.9);
+        return new THREE.BoxGeometry(0.62, 0.55, 0.62);
     }
   }
 
   function applyProxyPose(object: THREE.Object3D, meshId: ViewportObject["meshId"]) {
     switch (meshId) {
-      case "floor":
+      case "cornellFloor":
         object.position.set(0, 0, 0);
         object.rotation.set(-Math.PI / 2, 0, 0);
         break;
-      case "wall":
-        object.position.set(0, 0.95, 1.15);
-        break;
-      case "light":
-        object.position.set(0, 1.86, -0.14);
+      case "cornellCeiling":
+        object.position.set(0, 1.9, 0);
         object.rotation.set(Math.PI / 2, 0, 0);
         break;
-      case "swatch":
-        object.position.set(-0.02, 0.64, 0.08);
-        object.rotation.set(-0.08, 0.16, -0.08);
+      case "cornellBackWall":
+        object.position.set(0, 0.95, 1.15);
+        break;
+      case "cornellLeftWall":
+        object.position.set(-1.35, 0.95, 0);
+        object.rotation.set(0, Math.PI / 2, 0);
+        break;
+      case "cornellRightWall":
+        object.position.set(1.35, 0.95, 0);
+        object.rotation.set(0, -Math.PI / 2, 0);
+        break;
+      case "light":
+        object.position.set(0, 1.88, -0.12);
+        object.rotation.set(Math.PI / 2, 0, 0);
+        break;
+      case "tallBlock":
+        object.position.set(-0.43, 0.55, 0.28);
+        object.rotation.set(0, 0.32, 0);
+        break;
+      case "shortBlock":
+        object.position.set(0.48, 0.275, -0.25);
+        object.rotation.set(0, -0.28, 0);
         break;
     }
   }

@@ -111,8 +111,8 @@ struct SurfaceSelection {
 impl Default for SurfaceSelection {
     fn default() -> Self {
         Self {
-            id: "chair-shell".to_string(),
-            label: "Chair Shell".to_string(),
+            id: "sample-block".to_string(),
+            label: "Sample Block".to_string(),
         }
     }
 }
@@ -641,15 +641,25 @@ fn build_soyel_preview_scene(
     let mut scene = lupin_pt::SceneCPU::default();
 
     let floor_mat =
-        push_preview_material(&mut scene, preview_material(0.56, 0.55, 0.50, 0.82, 0.0));
-    let wall_mat = push_preview_material(&mut scene, preview_material(0.36, 0.40, 0.37, 0.68, 0.0));
-    let swatch_mat = push_preview_material(&mut scene, preview_material_from_polyhaven(material));
+        push_preview_material(&mut scene, preview_material(0.66, 0.65, 0.59, 0.82, 0.0));
+    let ceiling_mat =
+        push_preview_material(&mut scene, preview_material(0.72, 0.71, 0.66, 0.82, 0.0));
+    let back_wall_mat =
+        push_preview_material(&mut scene, preview_material(0.70, 0.69, 0.64, 0.82, 0.0));
+    let left_wall_mat =
+        push_preview_material(&mut scene, preview_material(0.62, 0.22, 0.18, 0.82, 0.0));
+    let right_wall_mat =
+        push_preview_material(&mut scene, preview_material(0.22, 0.52, 0.32, 0.82, 0.0));
+    let sample_block_mat =
+        push_preview_material(&mut scene, preview_material_from_polyhaven(material));
+    let tall_block_mat =
+        push_preview_material(&mut scene, preview_material(0.48, 0.50, 0.47, 0.74, 0.0));
     let light_mat = push_preview_material(&mut scene, {
         let mut material = lupin_pt::Material::default();
         material.emission = lupin_pt::Vec4 {
-            x: 16.0,
-            y: 13.0,
-            z: 8.0,
+            x: 20.0,
+            y: 17.0,
+            z: 12.0,
             w: 0.0,
         };
         material
@@ -668,32 +678,66 @@ fn build_soyel_preview_scene(
     push_preview_quad(
         &mut scene,
         [
+            lupin_pt::Vec4::new3(-1.35, 1.9, -1.15),
+            lupin_pt::Vec4::new3(1.35, 1.9, -1.15),
+            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
+            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
+        ],
+        ceiling_mat,
+    );
+    push_preview_quad(
+        &mut scene,
+        [
             lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
             lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
             lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
             lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
         ],
-        wall_mat,
+        back_wall_mat,
     );
     push_preview_quad(
         &mut scene,
         [
-            lupin_pt::Vec4::new3(-0.48, 0.28, 0.23),
-            lupin_pt::Vec4::new3(0.52, 0.20, 0.07),
-            lupin_pt::Vec4::new3(0.45, 1.08, -0.08),
-            lupin_pt::Vec4::new3(-0.55, 1.00, 0.08),
+            lupin_pt::Vec4::new3(-1.35, 0.0, -1.15),
+            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
+            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
+            lupin_pt::Vec4::new3(-1.35, 1.9, -1.15),
         ],
-        swatch_mat,
+        left_wall_mat,
     );
     push_preview_quad(
         &mut scene,
         [
-            lupin_pt::Vec4::new3(-0.34, 1.86, 0.14),
-            lupin_pt::Vec4::new3(0.34, 1.86, 0.14),
-            lupin_pt::Vec4::new3(0.34, 1.86, -0.42),
-            lupin_pt::Vec4::new3(-0.34, 1.86, -0.42),
+            lupin_pt::Vec4::new3(1.35, 0.0, -1.15),
+            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
+            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
+            lupin_pt::Vec4::new3(1.35, 1.9, -1.15),
+        ],
+        right_wall_mat,
+    );
+    push_preview_quad(
+        &mut scene,
+        [
+            lupin_pt::Vec4::new3(-0.34, 1.88, 0.16),
+            lupin_pt::Vec4::new3(0.34, 1.88, 0.16),
+            lupin_pt::Vec4::new3(0.34, 1.88, -0.40),
+            lupin_pt::Vec4::new3(-0.34, 1.88, -0.40),
         ],
         light_mat,
+    );
+    push_preview_box(
+        &mut scene,
+        [0.48, 0.275, -0.25],
+        [0.62, 0.55, 0.62],
+        -0.28,
+        sample_block_mat,
+    );
+    push_preview_box(
+        &mut scene,
+        [-0.43, 0.55, 0.28],
+        [0.56, 1.10, 0.56],
+        0.32,
+        tall_block_mat,
     );
 
     lupin_pt::validate_scene(&scene, 0, 0);
@@ -823,6 +867,90 @@ fn push_preview_quad(scene: &mut lupin_pt::SceneCPU, verts: [lupin_pt::Vec4; 4],
         mat_idx,
         ..Default::default()
     });
+}
+
+fn push_preview_box(
+    scene: &mut lupin_pt::SceneCPU,
+    center: [f32; 3],
+    size: [f32; 3],
+    yaw: f32,
+    mat_idx: u32,
+) {
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let vertex = |x: f32, y: f32, z: f32| {
+        let rx = x * cos_yaw + z * sin_yaw;
+        let rz = -x * sin_yaw + z * cos_yaw;
+        lupin_pt::Vec4::new3(center[0] + rx, center[1] + y, center[2] + rz)
+    };
+
+    let x0 = -half[0];
+    let x1 = half[0];
+    let y0 = -half[1];
+    let y1 = half[1];
+    let z0 = -half[2];
+    let z1 = half[2];
+
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x1, y0, z0),
+            vertex(x1, y1, z0),
+            vertex(x0, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z1),
+            vertex(x1, y0, z1),
+            vertex(x1, y1, z1),
+            vertex(x0, y1, z1),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x0, y0, z1),
+            vertex(x0, y1, z1),
+            vertex(x0, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x1, y0, z0),
+            vertex(x1, y0, z1),
+            vertex(x1, y1, z1),
+            vertex(x1, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y1, z0),
+            vertex(x1, y1, z0),
+            vertex(x1, y1, z1),
+            vertex(x0, y1, z1),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x1, y0, z0),
+            vertex(x1, y0, z1),
+            vertex(x0, y0, z1),
+        ],
+        mat_idx,
+    );
 }
 
 fn preview_material(r: f32, g: f32, b: f32, roughness: f32, metallic: f32) -> lupin_pt::Material {

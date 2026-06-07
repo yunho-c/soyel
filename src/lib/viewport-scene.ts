@@ -17,7 +17,15 @@ export type Transform = {
 export type ViewportObject = {
   id: string;
   label: string;
-  meshId: "floor" | "wall" | "swatch" | "light";
+  meshId:
+    | "cornellFloor"
+    | "cornellCeiling"
+    | "cornellBackWall"
+    | "cornellLeftWall"
+    | "cornellRightWall"
+    | "shortBlock"
+    | "tallBlock"
+    | "light";
   materialId?: string;
   transform: Transform;
   visible: boolean;
@@ -31,8 +39,8 @@ export type ViewportScene = {
 };
 
 export const defaultCameraState: CameraState = {
-  position: [0, 0.95, -3.1],
-  target: [0, 0.68, 0.05],
+  position: [0, 0.95, -3.35],
+  target: [0, 0.82, 0.1],
   up: [0, 1, 0],
   fovDegrees: 42,
 };
@@ -41,32 +49,60 @@ export function createDefaultViewportScene(): ViewportScene {
   return {
     revision: 1,
     camera: { ...defaultCameraState },
-    selection: "chair-shell",
+    selection: "sample-block",
     objects: [
       {
-        id: "chair-shell",
-        label: "Chair Shell",
-        meshId: "swatch",
+        id: "sample-block",
+        label: "Sample Block",
+        meshId: "shortBlock",
         transform: identityTransform(),
         visible: true,
       },
       {
-        id: "aluminum-base",
-        label: "Aluminum Base",
-        meshId: "floor",
+        id: "tall-block",
+        label: "Tall Block",
+        meshId: "tallBlock",
         transform: identityTransform(),
         visible: true,
       },
       {
-        id: "soft-grip",
-        label: "Soft Grip",
-        meshId: "wall",
+        id: "left-wall",
+        label: "Left Wall",
+        meshId: "cornellLeftWall",
         transform: identityTransform(),
         visible: true,
       },
       {
-        id: "control-dial",
-        label: "Control Dial",
+        id: "right-wall",
+        label: "Right Wall",
+        meshId: "cornellRightWall",
+        transform: identityTransform(),
+        visible: true,
+      },
+      {
+        id: "back-wall",
+        label: "Back Wall",
+        meshId: "cornellBackWall",
+        transform: identityTransform(),
+        visible: true,
+      },
+      {
+        id: "floor",
+        label: "Floor",
+        meshId: "cornellFloor",
+        transform: identityTransform(),
+        visible: true,
+      },
+      {
+        id: "ceiling",
+        label: "Ceiling",
+        meshId: "cornellCeiling",
+        transform: identityTransform(),
+        visible: true,
+      },
+      {
+        id: "area-light",
+        label: "Area Light",
         meshId: "light",
         transform: identityTransform(),
         visible: true,
