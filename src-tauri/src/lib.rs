@@ -749,12 +749,12 @@ fn preview_camera_for_request(
     }
 
     let forward = normalize3(direction);
-    let right = normalize3(cross3(forward, camera.up));
+    let right = normalize3(cross3(camera.up, forward));
     if length3(right) < 0.001 {
         return fallback();
     }
 
-    let true_up = normalize3(cross3(right, forward));
+    let true_up = normalize3(cross3(forward, right));
     let fov_degrees = if camera.fov_degrees.is_finite() {
         camera.fov_degrees.clamp(18.0, 80.0)
     } else {
@@ -772,12 +772,7 @@ fn preview_camera_for_request(
         aspect,
     };
     let camera_transform = lupin_pt::Mat3x4 {
-        m: [
-            right,
-            true_up,
-            [-forward[0], -forward[1], -forward[2]],
-            camera.position,
-        ],
+        m: [right, true_up, forward, camera.position],
     };
 
     (camera_params, camera_transform)
@@ -992,6 +987,96 @@ fn read_rgba8_texture(
     buffer.unmap();
 
     Ok(pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[test]
+    fn preview_camera_from_frontend_looks_toward_scene() {
+        let camera = default_frontend_preview_camera();
+        let (_, transform) = preview_camera_for_request(16.0 / 9.0, Some(&camera));
+
+        assert!(
+            transform.m[2][2] > 0.9,
+            "Lupin camera forward axis should point toward world +Z, got {:?}",
+            transform.m[2]
+        );
+        assert!(
+            transform.m[0][0] > 0.9,
+            "camera right axis should preserve a right-handed +X screen basis, got {:?}",
+            transform.m[0]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
+    fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
+        let width = 128;
+        let height = 96;
+        let camera = default_frontend_preview_camera();
+        let pixels = render_lupin_preview(width, height, 4, None, Some(&camera))?;
+
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+
+        let stats = rgba8_stats(&pixels);
+        assert!(
+            stats.non_black_pixels > 64,
+            "Soyel Lupin preview scene produced too few visible pixels: {stats:?}"
+        );
+        assert!(
+            stats.max_luma > 8,
+            "Soyel Lupin preview scene produced only black or near-black pixels: {stats:?}"
+        );
+        assert!(
+            stats.unique_rgb_count > 2,
+            "Soyel Lupin preview scene did not produce varied RGB output: {stats:?}"
+        );
+
+        Ok(())
+    }
+
+    fn default_frontend_preview_camera() -> PreviewCamera {
+        PreviewCamera {
+            position: [0.0, 0.95, -3.1],
+            target: [0.0, 0.68, 0.05],
+            up: [0.0, 1.0, 0.0],
+            fov_degrees: 42.0,
+        }
+    }
+
+    #[derive(Debug)]
+    struct Rgba8Stats {
+        non_black_pixels: usize,
+        max_luma: u8,
+        unique_rgb_count: usize,
+    }
+
+    fn rgba8_stats(pixels: &[u8]) -> Rgba8Stats {
+        let mut unique_rgb = BTreeSet::new();
+        let mut non_black_pixels = 0;
+        let mut max_luma = 0;
+
+        for pixel in pixels.chunks_exact(4) {
+            let [red, green, blue, _alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            unique_rgb.insert((red, green, blue));
+
+            let luma = ((red as u16 * 54 + green as u16 * 183 + blue as u16 * 19) / 256) as u8;
+            max_luma = max_luma.max(luma);
+            if luma > 2 {
+                non_black_pixels += 1;
+            }
+        }
+
+        Rgba8Stats {
+            non_black_pixels,
+            max_luma,
+            unique_rgb_count: unique_rgb.len(),
+        }
+    }
 }
 
 #[tauri::command]
