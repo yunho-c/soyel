@@ -12,7 +12,6 @@
   import EyeIcon from "lucide-svelte/icons/eye";
   import FileStackIcon from "lucide-svelte/icons/file-stack";
   import FolderTreeIcon from "lucide-svelte/icons/folder-tree";
-  import GaugeIcon from "lucide-svelte/icons/gauge";
   import Grid3X3Icon from "lucide-svelte/icons/grid-3x3";
   import ImageIcon from "lucide-svelte/icons/image";
   import Layers3Icon from "lucide-svelte/icons/layers-3";
@@ -35,6 +34,7 @@
   import InteractiveViewport from "$lib/components/viewport/InteractiveViewport.svelte";
   import { Button } from "$lib/components/ui/button";
   import * as Resizable from "$lib/components/ui/resizable";
+  import * as Select from "$lib/components/ui/select";
   import {
     applyMaterialToSelection,
     downloadPolyHavenMaterial,
@@ -86,10 +86,25 @@
   let errorMessage = $state("");
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
+  type ViewportDisplayMode = "preview" | "ray-traced" | "hybrid";
+
+  const viewportDisplayModes = [
+    { value: "preview", label: "Preview" },
+    { value: "ray-traced", label: "Ray-Traced" },
+    { value: "hybrid", label: "Hybrid" },
+  ] satisfies Array<{ value: ViewportDisplayMode; label: string }>;
+
+  let viewportDisplayMode = $state<ViewportDisplayMode>("hybrid");
+  let selectedViewportDisplayMode = $derived(
+    viewportDisplayModes.find((mode) => mode.value === viewportDisplayMode)?.label ?? "Hybrid",
+  );
   let hasPathTracedPixels = $derived(
     previewFrame ? previewFrame.pixels.length === previewFrame.width * previewFrame.height * 4 : false,
   );
-  let rasterFillOpacity = $derived(pathTraceStale || isViewportInteracting || !hasPathTracedPixels ? 1 : 0);
+  let showPathTracedCanvas = $derived(viewportDisplayMode !== "preview" && hasPathTracedPixels);
+  let rasterFillOpacity = $derived(
+    viewportDisplayMode === "preview" || pathTraceStale || isViewportInteracting || !hasPathTracedPixels ? 1 : 0,
+  );
 
   const activities = [
     { id: "scene", label: "Scene", icon: FolderTreeIcon },
@@ -433,7 +448,6 @@
       </div>
       <div class="flex flex-col leading-none">
         <span class="text-sm font-semibold">soyel</span>
-        <span class="text-[0.68rem] text-muted-foreground">Lupin renderer workspace</span>
       </div>
     </div>
 
@@ -443,7 +457,7 @@
         <input
           bind:value={query}
           class="h-7 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          placeholder="Search Poly Haven materials"
+          placeholder="Search"
           onkeydown={(event) => event.key === "Enter" && loadMaterials()}
         />
         <Button variant="ghost" size="xs" onclick={loadMaterials}>Search</Button>
@@ -654,10 +668,16 @@
                     <EyeIcon data-icon="inline-start" />
                   </Button>
                 </div>
-                <div class="flex items-center gap-2 text-xs text-muted-foreground">
-                  <GaugeIcon class="size-4" />
-                  <span>{status?.engineName ?? "Renderer"} · {status?.gpuApi ?? "initializing"}</span>
-                </div>
+                <Select.Root type="single" bind:value={viewportDisplayMode} items={viewportDisplayModes}>
+                  <Select.Trigger aria-label="Viewport display mode">
+                    {selectedViewportDisplayMode}
+                  </Select.Trigger>
+                  <Select.Content align="end">
+                    {#each viewportDisplayModes as mode}
+                      <Select.Item value={mode.value} label={mode.label}>{mode.label}</Select.Item>
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
               </div>
 
               <div class="relative min-h-0 flex-1 overflow-hidden bg-[#121514]">
@@ -669,7 +689,8 @@
                     width={previewFrame?.width ?? 360}
                     height={previewFrame?.height ?? 260}
                     class="absolute inset-0 size-full object-cover transition-opacity duration-200"
-                    class:opacity-55={pathTraceStale || isViewportInteracting}
+                    class:opacity-0={!showPathTracedCanvas}
+                    class:opacity-55={showPathTracedCanvas && (pathTraceStale || isViewportInteracting)}
                     aria-label="Lupin rendered preview"
                   ></canvas>
                   <InteractiveViewport
@@ -683,25 +704,6 @@
                     onInteractionChange={handleViewportInteractionChange}
                     onSelectSurface={selectSurface}
                   />
-                  <div class="absolute bottom-5 left-5 right-5 flex items-end justify-between gap-4 text-white">
-                    <div class="min-w-0">
-                      <div class="text-[0.7rem] uppercase text-white/55">Hybrid viewport</div>
-                      <div class="truncate text-2xl font-semibold">
-                        {previewFrame?.materialName ?? selectedMaterial?.name ?? "Cornell material study"}
-                      </div>
-                    </div>
-                    <div class="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-right text-xs text-white/70 backdrop-blur">
-                      <div>{previewFrame?.samples ?? 0} samples</div>
-                      <div>{previewFrame?.width ?? 360} x {previewFrame?.height ?? 260}</div>
-                    </div>
-                  </div>
-                </div>
-                <div class="absolute left-6 top-6 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 backdrop-blur">
-                  RGBA8 readback · ACES · interactive preview
-                </div>
-                <div class="absolute bottom-6 right-6 flex items-center gap-2 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/70 backdrop-blur">
-                  <CircleDotDashedIcon class="size-4 text-emerald-300" />
-                  {status?.selectedSurface.label ?? "Surface"} target
                 </div>
               </div>
             </section>
@@ -912,13 +914,14 @@
 
   <footer class="flex h-6 shrink-0 items-center justify-between border-t bg-primary px-3 text-[0.72rem] font-medium text-primary-foreground">
     <div class="flex min-w-0 items-center gap-4">
-      <span class="truncate">Renderer: {status?.engineName ?? "LupinPathTracer"}</span>
       <span class="truncate">Surface: {status?.selectedSurface.label ?? "Chair Shell"}</span>
       <span class="truncate">Materials: {materials.length}</span>
     </div>
     <div class="flex items-center gap-4">
       <span>{resolution.toUpperCase()}</span>
-      <span>{errorMessage ? "Attention" : "Ready"}</span>
+      {#if errorMessage}
+        <span>Attention</span>
+      {/if}
     </div>
   </footer>
 </main>
