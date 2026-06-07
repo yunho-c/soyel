@@ -352,16 +352,24 @@ fn render_preview_frame(
     let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
     let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
 
-    let pixels = panic::catch_unwind(AssertUnwindSafe(|| {
+    let pixels = match panic::catch_unwind(AssertUnwindSafe(|| {
         render_lupin_preview(width, height, samples, material.as_ref(), camera.as_ref())
-    }))
-    .map_err(|payload| {
-        format!(
-            "Lupin preview render crashed for {surface_id}: {}",
-            panic_payload_to_string(payload.as_ref())
-        )
-    })?
-    .map_err(|error| format!("Lupin preview render failed for {surface_id}: {error}"))?;
+    })) {
+        Ok(Ok(pixels)) => pixels,
+        Ok(Err(error)) => {
+            let message = format!("Lupin preview render failed for {surface_id}: {error}");
+            eprintln!("[soyel] {message}");
+            return Err(message);
+        }
+        Err(payload) => {
+            let message = format!(
+                "Lupin preview render crashed for {surface_id}: {}",
+                panic_payload_to_string(payload.as_ref())
+            );
+            eprintln!("[soyel] {message}");
+            return Err(message);
+        }
+    };
     let material_name = material.map(|material| material.name);
 
     Ok(RenderPreviewFrame {

@@ -83,6 +83,7 @@
   let isRendering = $state(false);
   let isViewportInteracting = $state(false);
   let pathTraceStale = $state(true);
+  let previewError = $state("");
   let errorMessage = $state("");
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
@@ -102,9 +103,20 @@
     previewFrame ? previewFrame.pixels.length === previewFrame.width * previewFrame.height * 4 : false,
   );
   let showPathTracedCanvas = $derived(viewportDisplayMode !== "preview" && hasPathTracedPixels);
-  let rasterFillOpacity = $derived(
-    viewportDisplayMode === "preview" || pathTraceStale || isViewportInteracting || !hasPathTracedPixels ? 1 : 0,
+  let showRasterViewport = $derived(
+    viewportDisplayMode === "preview" ||
+      (viewportDisplayMode === "hybrid" && (pathTraceStale || isViewportInteracting || !hasPathTracedPixels)),
   );
+  let showInteractiveViewport = $derived(viewportDisplayMode !== "ray-traced");
+  let rasterFillOpacity = $derived(
+    showRasterViewport ? 1 : 0,
+  );
+  let rasterGuideOpacity = $derived(showRasterViewport ? 1 : 0);
+  let showRayTraceNotice = $derived(
+    viewportDisplayMode === "ray-traced" && !isRendering && !hasPathTracedPixels,
+  );
+  let rayTraceNotice = $derived(previewError || "No ray-traced frame");
+  let lastRequestedViewportDisplayMode = $state<ViewportDisplayMode>("hybrid");
 
   const activities = [
     { id: "scene", label: "Scene", icon: FolderTreeIcon },
@@ -153,6 +165,18 @@
   $effect(() => {
     if (previewCanvas && previewFrame) {
       paintPreviewFrame(previewCanvas, previewFrame);
+    }
+  });
+
+  $effect(() => {
+    const mode = viewportDisplayMode;
+    if (mode === lastRequestedViewportDisplayMode) {
+      return;
+    }
+
+    lastRequestedViewportDisplayMode = mode;
+    if (mode !== "preview") {
+      schedulePreviewFrame(0);
     }
   });
 
@@ -358,6 +382,7 @@
   async function refreshPreviewFrame(revision = viewportScene.revision) {
     isRendering = true;
     errorMessage = "";
+    previewError = "";
     pathTraceStale = true;
     activePreviewRevision = revision;
 
@@ -375,7 +400,8 @@
         pathTraceStale = false;
       }
     } catch (error) {
-      errorMessage = String(error);
+      previewError = String(error);
+      errorMessage = previewError;
     } finally {
       if (activePreviewRevision === revision) {
         isRendering = false;
@@ -693,17 +719,27 @@
                     class:opacity-55={showPathTracedCanvas && (pathTraceStale || isViewportInteracting)}
                     aria-label="Lupin rendered preview"
                   ></canvas>
-                  <InteractiveViewport
-                    viewportScene={viewportScene}
-                    selectedSurfaceId={status?.selectedSurface.id}
-                    appliedMaterials={status?.appliedMaterials ?? []}
-                    isRendering={isRendering}
-                    isPathTraceStale={pathTraceStale || isViewportInteracting}
-                    rasterFillOpacity={rasterFillOpacity}
-                    onCameraChange={handleViewportCameraChange}
-                    onInteractionChange={handleViewportInteractionChange}
-                    onSelectSurface={selectSurface}
-                  />
+                  {#if showInteractiveViewport}
+                    <InteractiveViewport
+                      viewportScene={viewportScene}
+                      selectedSurfaceId={status?.selectedSurface.id}
+                      appliedMaterials={status?.appliedMaterials ?? []}
+                      isRendering={isRendering}
+                      isPathTraceStale={pathTraceStale || isViewportInteracting}
+                      rasterFillOpacity={rasterFillOpacity}
+                      rasterGuideOpacity={rasterGuideOpacity}
+                      onCameraChange={handleViewportCameraChange}
+                      onInteractionChange={handleViewportInteractionChange}
+                      onSelectSurface={selectSurface}
+                    />
+                  {/if}
+                  {#if showRayTraceNotice}
+                    <div class="pointer-events-none absolute inset-0 grid place-items-center bg-black/75 px-8 text-center text-sm text-white/70">
+                      <div class="max-w-md rounded-md border border-white/10 bg-black/40 px-4 py-3 backdrop-blur">
+                        {rayTraceNotice}
+                      </div>
+                    </div>
+                  {/if}
                 </div>
               </div>
             </section>

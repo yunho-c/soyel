@@ -18,6 +18,7 @@
     isRendering?: boolean;
     isPathTraceStale?: boolean;
     rasterFillOpacity?: number;
+    rasterGuideOpacity?: number;
     onCameraChange?: (camera: CameraState, active: boolean) => void;
     onInteractionChange?: (active: boolean) => void;
     onSelectSurface?: (id: string, label: string) => void;
@@ -37,6 +38,7 @@
     isRendering = false,
     isPathTraceStale = false,
     rasterFillOpacity = 1,
+    rasterGuideOpacity = 1,
     onCameraChange,
     onInteractionChange,
     onSelectSurface,
@@ -53,6 +55,7 @@
   let resizeObserver: ResizeObserver | null = null;
   let animationFrame = 0;
   let applyingCamera = false;
+  let rasterGuides: THREE.Object3D[] = [];
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
@@ -113,10 +116,12 @@
 
     const grid = new THREE.GridHelper(3.2, 16, 0x526057, 0x28312d);
     grid.position.y = -0.002;
+    rasterGuides = [grid];
     scene.add(grid);
 
     const axes = new THREE.AxesHelper(0.55);
     axes.position.set(-1.35, 0.025, -1.12);
+    rasterGuides = [...rasterGuides, axes];
     scene.add(axes);
 
     controls = new OrbitControls(camera, renderer.domElement);
@@ -217,6 +222,12 @@
     const appliedBySurface = new Map(appliedMaterials.map((material) => [material.surfaceId, material]));
     const fillOpacity = clamp01(rasterFillOpacity);
     const materialWrites = fillOpacity > 0.01;
+    const guideOpacity = clamp01(rasterGuideOpacity);
+    const showGuides = guideOpacity > 0.01;
+
+    for (const guide of rasterGuides) {
+      guide.visible = showGuides;
+    }
 
     for (const [id, record] of meshRecords) {
       const applied = appliedBySurface.get(id);
