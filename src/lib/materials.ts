@@ -354,7 +354,7 @@ export async function streamPreviewFrame(
       requestedSamples: args.samples ?? mockPreviewFrame.samples,
       final: true,
     });
-    return;
+    return 0;
   }
 
   const onFrameChannel = new Channel<ArrayBuffer | Uint8Array>();
@@ -365,7 +365,7 @@ export async function streamPreviewFrame(
     }
   };
 
-  await invoke<void>("stream_preview_frame", { ...args, onFrame: onFrameChannel });
+  return invoke<number>("stream_preview_frame", { ...args, onFrame: onFrameChannel });
 }
 
 function parseStreamPreviewFrame(message: ArrayBuffer | Uint8Array): RenderPreviewStreamFrame | null {

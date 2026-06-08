@@ -4,8 +4,9 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        mpsc, Arc, Mutex,
     },
+    thread,
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,11 +25,10 @@ const STREAM_FRAME_VERSION: u32 = 1;
 const STREAM_FRAME_HEADER_BYTES: usize = 32;
 const STREAM_FRAME_FINAL: u32 = 1;
 
-#[derive(Debug)]
 struct AppState {
     renderer: Mutex<RendererSession>,
     polyhaven: reqwest::Client,
-    preview_render_generation: AtomicU64,
+    render_dispatcher: RenderDispatcher,
 }
 
 impl AppState {
@@ -41,7 +41,323 @@ impl AppState {
         Self {
             renderer: Mutex::new(RendererSession::default()),
             polyhaven,
-            preview_render_generation: AtomicU64::new(0),
+            render_dispatcher: RenderDispatcher::new(),
+        }
+    }
+}
+
+struct RenderDispatcher {
+    next_job_id: AtomicU64,
+    latest_preview_job_id: Arc<AtomicU64>,
+    jobs: mpsc::Sender<RenderJob>,
+}
+
+impl RenderDispatcher {
+    fn new() -> Self {
+        let (jobs, receiver) = mpsc::channel();
+        let latest_preview_job_id = Arc::new(AtomicU64::new(0));
+        let worker_latest_preview_job_id = Arc::clone(&latest_preview_job_id);
+
+        thread::Builder::new()
+            .name("soyel-rt-preview".to_string())
+            .spawn(move || render_worker_loop(receiver, worker_latest_preview_job_id))
+            .expect("failed to start RT preview render worker");
+
+        Self {
+            next_job_id: AtomicU64::new(1),
+            latest_preview_job_id,
+            jobs,
+        }
+    }
+
+    fn submit_preview(&self, request: PreviewRenderJob) -> Result<u64, String> {
+        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst);
+        self.latest_preview_job_id.store(job_id, Ordering::SeqCst);
+        self.jobs
+            .send(RenderJob::Preview { job_id, request })
+            .map_err(|error| format!("RT preview worker is unavailable: {error}"))?;
+        Ok(job_id)
+    }
+}
+
+enum RenderJob {
+    Preview {
+        job_id: u64,
+        request: PreviewRenderJob,
+    },
+}
+
+struct PreviewRenderJob {
+    revision: u64,
+    width: u32,
+    height: u32,
+    samples: u32,
+    surface_id: String,
+    scene: Option<SceneSnapshot>,
+    material: Option<PreviewMaterial>,
+    camera: Option<PreviewCamera>,
+    on_frame: Channel<InvokeResponseBody>,
+}
+
+fn render_worker_loop(receiver: mpsc::Receiver<RenderJob>, latest_preview_job_id: Arc<AtomicU64>) {
+    let mut worker = PreviewRenderWorker::default();
+
+    for job in receiver {
+        match job {
+            RenderJob::Preview { job_id, request } => {
+                if latest_preview_job_id.load(Ordering::SeqCst) != job_id {
+                    continue;
+                }
+
+                let surface_id = request.surface_id.clone();
+                let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    worker.render_streaming(request, || {
+                        latest_preview_job_id.load(Ordering::SeqCst) != job_id
+                    })
+                }));
+
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("[soyel] Lupin preview render failed for {surface_id}: {error}");
+                    }
+                    Err(payload) => {
+                        eprintln!(
+                            "[soyel] Lupin preview render crashed for {surface_id}: {}",
+                            panic_payload_to_string(payload.as_ref())
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreviewRenderWorker {
+    context: Option<PreviewRenderContext>,
+    targets: Option<PreviewRenderTargets>,
+}
+
+struct PreviewRenderContext {
+    device: lupin_pt::wgpu::Device,
+    queue: lupin_pt::wgpu::Queue,
+    pathtrace_resources: lupin_pt::PathtraceResources,
+    tonemap_resources: lupin_pt::TonemapResources,
+}
+
+struct PreviewRenderTargets {
+    width: u32,
+    height: u32,
+    output: lupin_pt::DoubleBufferedTexture,
+    tonemapped: lupin_pt::wgpu::Texture,
+}
+
+impl PreviewRenderWorker {
+    fn ensure_context(&mut self) -> Result<(), String> {
+        if self.context.is_none() {
+            ensure_lupin_preview_supported()?;
+            let (device, queue, _) = lupin_pt::init_default_wgpu_context_no_window();
+            let pathtrace_resources = lupin_pt::build_pathtrace_resources(
+                &device,
+                &lupin_pt::BakedPathtraceParams {
+                    with_runtime_checks: false,
+                    max_bounces: 4,
+                    samples_per_pixel: 1,
+                },
+            );
+            let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
+
+            self.context = Some(PreviewRenderContext {
+                device,
+                queue,
+                pathtrace_resources,
+                tonemap_resources,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn ensure_targets(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.ensure_context()?;
+        let needs_recreate = self
+            .targets
+            .as_ref()
+            .map(|targets| targets.width != width || targets.height != height)
+            .unwrap_or(true);
+
+        if needs_recreate {
+            let targets = {
+                let context = self
+                    .context
+                    .as_ref()
+                    .expect("preview render context initialized");
+                PreviewRenderTargets::new(&context.device, width, height)
+            };
+            self.targets = Some(targets);
+        }
+
+        Ok(())
+    }
+
+    fn render_streaming(
+        &mut self,
+        request: PreviewRenderJob,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<(), String> {
+        self.ensure_context()?;
+        self.ensure_targets(request.width, request.height)?;
+
+        let context = self
+            .context
+            .as_ref()
+            .expect("preview render context initialized");
+        let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
+            &context.device,
+            &context.queue,
+            request.scene.as_ref(),
+            Some(request.surface_id.as_str()),
+            request.material.as_ref(),
+            request.width as f32 / request.height as f32,
+            request.camera.as_ref(),
+        )?;
+        let targets = self
+            .targets
+            .as_mut()
+            .expect("preview render targets initialized");
+
+        for accum_counter in 0..request.samples {
+            if should_cancel() {
+                return Ok(());
+            }
+
+            lupin_pt::pathtrace_scene(
+                &context.device,
+                &context.queue,
+                &context.pathtrace_resources,
+                &scene,
+                targets.output.front(),
+                Default::default(),
+                &lupin_pt::PathtraceDesc {
+                    accum_params: Some(lupin_pt::AccumulationParams {
+                        prev_frame: targets.output.back(),
+                        accum_counter,
+                    }),
+                    tile_params: None,
+                    camera_params,
+                    camera_transform,
+                    force_software_bvh: true,
+                    advanced: lupin_pt::AdvancedParams {
+                        max_radiance: 12.0,
+                        ..Default::default()
+                    },
+                },
+            );
+
+            let completed_samples = accum_counter + 1;
+            let final_frame = completed_samples == request.samples;
+            if should_emit_stream_preview_frame(completed_samples, request.samples) {
+                if should_cancel() {
+                    return Ok(());
+                }
+
+                lupin_pt::tonemap_and_fit_aspect(
+                    &context.device,
+                    &context.queue,
+                    &context.tonemap_resources,
+                    targets.output.front(),
+                    &targets.tonemapped,
+                    &lupin_pt::TonemapDesc {
+                        viewport: None,
+                        exposure: 0.0,
+                        filmic: true,
+                        srgb: true,
+                        clear: true,
+                    },
+                );
+
+                let pixels = read_rgba8_texture(
+                    &context.device,
+                    &context.queue,
+                    &targets.tonemapped,
+                    request.width,
+                    request.height,
+                )?;
+                if should_cancel() {
+                    return Ok(());
+                }
+
+                let packet = stream_preview_frame_packet(
+                    request.revision,
+                    request.width,
+                    request.height,
+                    completed_samples,
+                    request.samples,
+                    final_frame,
+                    pixels,
+                );
+                request
+                    .on_frame
+                    .send(InvokeResponseBody::Raw(packet))
+                    .map_err(|error| error.to_string())?;
+            }
+
+            targets.output.flip();
+        }
+
+        Ok(())
+    }
+}
+
+impl PreviewRenderTargets {
+    fn new(device: &lupin_pt::wgpu::Device, width: u32, height: u32) -> Self {
+        use lupin_pt::wgpu;
+
+        let output = lupin_pt::DoubleBufferedTexture::create(
+            device,
+            &wgpu::TextureDescriptor {
+                label: Some("Soyel Lupin streaming preview HDR output"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            },
+        );
+
+        let tonemapped = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Soyel Lupin streaming preview RGBA output"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        Self {
+            width,
+            height,
+            output,
+            tonemapped,
         }
     }
 }
@@ -472,11 +788,7 @@ fn stream_preview_frame(
     camera: Option<PreviewCamera>,
     scene: Option<SceneSnapshot>,
     on_frame: Channel<InvokeResponseBody>,
-) -> Result<(), String> {
-    let generation = state
-        .preview_render_generation
-        .fetch_add(1, Ordering::SeqCst)
-        + 1;
+) -> Result<u64, String> {
     let (surface_id, material) = {
         let session = state
             .renderer
@@ -498,42 +810,17 @@ fn stream_preview_frame(
         .clamp(1, MAX_STREAM_PREVIEW_SAMPLES);
     let revision = revision.unwrap_or_default();
 
-    match panic::catch_unwind(AssertUnwindSafe(|| {
-        render_lupin_preview_streaming(
-            width,
-            height,
-            samples,
-            scene.as_ref(),
-            Some(surface_id.as_str()),
-            material.as_ref(),
-            camera.as_ref(),
-            || state.preview_render_generation.load(Ordering::SeqCst) != generation,
-            |completed_samples, pixels, final_frame| {
-                let packet = stream_preview_frame_packet(
-                    revision,
-                    width,
-                    height,
-                    completed_samples,
-                    samples,
-                    final_frame,
-                    pixels,
-                );
-                on_frame
-                    .send(InvokeResponseBody::Raw(packet))
-                    .map_err(|error| error.to_string())
-            },
-        )
-    })) {
-        Ok(result) => result,
-        Err(payload) => {
-            let message = format!(
-                "Lupin preview render crashed for {surface_id}: {}",
-                panic_payload_to_string(payload.as_ref())
-            );
-            eprintln!("[soyel] {message}");
-            Err(message)
-        }
-    }
+    state.render_dispatcher.submit_preview(PreviewRenderJob {
+        revision,
+        width,
+        height,
+        samples,
+        surface_id,
+        scene,
+        material,
+        camera,
+        on_frame,
+    })
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -742,136 +1029,6 @@ fn render_lupin_preview(
     );
 
     read_rgba8_texture(&device, &queue, &tonemapped, width, height)
-}
-
-fn render_lupin_preview_streaming(
-    width: u32,
-    height: u32,
-    samples: u32,
-    scene_snapshot: Option<&SceneSnapshot>,
-    material_override_surface_id: Option<&str>,
-    material: Option<&PreviewMaterial>,
-    camera: Option<&PreviewCamera>,
-    mut should_cancel: impl FnMut() -> bool,
-    mut emit_frame: impl FnMut(u32, Vec<u8>, bool) -> Result<(), String>,
-) -> Result<(), String> {
-    use lupin_pt::wgpu;
-
-    ensure_lupin_preview_supported()?;
-
-    let (device, queue, _) = lupin_pt::init_default_wgpu_context_no_window();
-    let pathtrace_resources = lupin_pt::build_pathtrace_resources(
-        &device,
-        &lupin_pt::BakedPathtraceParams {
-            with_runtime_checks: false,
-            max_bounces: 4,
-            samples_per_pixel: 1,
-        },
-    );
-    let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
-    let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
-        &device,
-        &queue,
-        scene_snapshot,
-        material_override_surface_id,
-        material,
-        width as f32 / height as f32,
-        camera,
-    )?;
-
-    let mut output = lupin_pt::DoubleBufferedTexture::create(
-        &device,
-        &wgpu::TextureDescriptor {
-            label: Some("Soyel Lupin streaming preview HDR output"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        },
-    );
-
-    let tonemapped = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Soyel Lupin streaming preview RGBA output"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-
-    for accum_counter in 0..samples {
-        if should_cancel() {
-            return Ok(());
-        }
-
-        lupin_pt::pathtrace_scene(
-            &device,
-            &queue,
-            &pathtrace_resources,
-            &scene,
-            output.front(),
-            Default::default(),
-            &lupin_pt::PathtraceDesc {
-                accum_params: Some(lupin_pt::AccumulationParams {
-                    prev_frame: output.back(),
-                    accum_counter,
-                }),
-                tile_params: None,
-                camera_params,
-                camera_transform,
-                force_software_bvh: true,
-                advanced: lupin_pt::AdvancedParams {
-                    max_radiance: 12.0,
-                    ..Default::default()
-                },
-            },
-        );
-
-        let completed_samples = accum_counter + 1;
-        let final_frame = completed_samples == samples;
-        if should_emit_stream_preview_frame(completed_samples, samples) {
-            lupin_pt::tonemap_and_fit_aspect(
-                &device,
-                &queue,
-                &tonemap_resources,
-                output.front(),
-                &tonemapped,
-                &lupin_pt::TonemapDesc {
-                    viewport: None,
-                    exposure: 0.0,
-                    filmic: true,
-                    srgb: true,
-                    clear: true,
-                },
-            );
-
-            let pixels = read_rgba8_texture(&device, &queue, &tonemapped, width, height)?;
-            emit_frame(completed_samples, pixels, final_frame)?;
-        }
-
-        output.flip();
-    }
-
-    Ok(())
 }
 
 fn should_emit_stream_preview_frame(completed_samples: u32, total_samples: u32) -> bool {
