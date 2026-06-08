@@ -595,16 +595,7 @@
 </script>
 
 <main class="flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground">
-  <div class="flex h-10 shrink-0 items-center justify-between border-b bg-card px-2">
-    <div class="flex items-center gap-2">
-      <div class="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-        <CuboidIcon class="size-4" />
-      </div>
-      <div class="flex flex-col leading-none">
-        <span class="text-sm font-semibold">soyel</span>
-      </div>
-    </div>
-
+  <div class="flex h-8 shrink-0 items-center justify-between border-b bg-card px-2">
     <div class="flex min-w-0 flex-1 items-center justify-center gap-2 px-4">
       <div class="hidden max-w-[46rem] flex-1 items-center gap-2 rounded-md border bg-background px-2 lg:flex">
         <SearchIcon class="size-4 text-muted-foreground" />
