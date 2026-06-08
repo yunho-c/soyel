@@ -595,9 +595,9 @@
 </script>
 
 <main class="flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground">
-  <div class="flex h-8 shrink-0 items-center justify-between border-b bg-card px-2">
-    <div class="flex min-w-0 flex-1 items-center justify-center gap-2 px-4">
-      <div class="hidden h-6 max-w-[46rem] flex-1 items-center gap-1.5 rounded-sm border bg-background px-1.5 lg:flex">
+  <div class="relative flex h-8 shrink-0 items-center justify-end border-b bg-card px-2">
+    <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-1/2 -translate-x-1/2 items-center justify-center lg:flex">
+      <div class="pointer-events-auto flex h-6 w-full items-center gap-1.5 rounded-sm border bg-background px-1.5">
         <SearchIcon class="size-3.5 text-muted-foreground" />
         <input
           bind:value={query}
