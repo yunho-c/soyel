@@ -605,9 +605,6 @@
           placeholder="Search"
           onkeydown={(event) => event.key === "Enter" && loadMaterials()}
         />
-        <Button variant="ghost" size="xs" class="h-5 rounded-sm px-1.5 text-[0.7rem]" onclick={loadMaterials}>
-          Search
-        </Button>
       </div>
     </div>
 
