@@ -174,7 +174,14 @@ export function createDefaultViewportScene(): ViewportScene {
 }
 
 export function getActiveCamera(scene: SoyelScene): SceneCamera {
-  return scene.cameras[scene.activeCameraId] ?? Object.values(scene.cameras)[0];
+  return (
+    scene.cameras[scene.activeCameraId] ??
+    Object.values(scene.cameras)[0] ?? {
+      id: "camera-main",
+      name: "Main Camera",
+      ...cloneCamera(defaultCameraState),
+    }
+  );
 }
 
 export function withSceneRevision(scene: SoyelScene, patch: Partial<Omit<SoyelScene, "revision">>) {
