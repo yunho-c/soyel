@@ -597,15 +597,17 @@
 <main class="flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground">
   <div class="flex h-8 shrink-0 items-center justify-between border-b bg-card px-2">
     <div class="flex min-w-0 flex-1 items-center justify-center gap-2 px-4">
-      <div class="hidden max-w-[46rem] flex-1 items-center gap-2 rounded-md border bg-background px-2 lg:flex">
-        <SearchIcon class="size-4 text-muted-foreground" />
+      <div class="hidden h-6 max-w-[46rem] flex-1 items-center gap-1.5 rounded-sm border bg-background px-1.5 lg:flex">
+        <SearchIcon class="size-3.5 text-muted-foreground" />
         <input
           bind:value={query}
-          class="h-7 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          class="h-5 min-w-0 flex-1 bg-transparent text-xs leading-none outline-none placeholder:text-muted-foreground"
           placeholder="Search"
           onkeydown={(event) => event.key === "Enter" && loadMaterials()}
         />
-        <Button variant="ghost" size="xs" onclick={loadMaterials}>Search</Button>
+        <Button variant="ghost" size="xs" class="h-5 rounded-sm px-1.5 text-[0.7rem]" onclick={loadMaterials}>
+          Search
+        </Button>
       </div>
     </div>
 
