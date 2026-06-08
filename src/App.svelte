@@ -31,6 +31,7 @@
   import TerminalIcon from "lucide-svelte/icons/terminal";
   import TimerIcon from "lucide-svelte/icons/timer";
 
+  import SampleCountMenu from "$lib/components/SampleCountMenu.svelte";
   import InteractiveViewport from "$lib/components/viewport/InteractiveViewport.svelte";
   import { Button } from "$lib/components/ui/button";
   import * as Resizable from "$lib/components/ui/resizable";
@@ -90,6 +91,12 @@
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
   let activePreviewRequest = 0;
+  const sampleCountPresets = [16, 32, 64, 128, 256, 512, 1024];
+  const sampleCountStorageKey = "soyel:rt-sample-counts:v1";
+  let previewSamples = $state(128);
+  let renderSamples = $state(512);
+  let lastScheduledPreviewSamples = $state(128);
+  let sampleCountsReady = $state(false);
   type ViewportDisplayMode = "preview" | "ray-traced" | "hybrid";
 
   const viewportDisplayModes = [
@@ -168,6 +175,30 @@
   });
 
   $effect(() => {
+    if (!sampleCountsReady) {
+      return;
+    }
+
+    saveSampleCounts();
+  });
+
+  $effect(() => {
+    if (!sampleCountsReady) {
+      return;
+    }
+
+    const samples = previewSamples;
+    if (samples === lastScheduledPreviewSamples) {
+      return;
+    }
+
+    lastScheduledPreviewSamples = samples;
+    if (viewportDisplayMode !== "preview") {
+      schedulePreviewFrame(180);
+    }
+  });
+
+  $effect(() => {
     if (previewCanvas && previewFrame) {
       paintPreviewFrame(previewCanvas, previewFrame);
     }
@@ -212,6 +243,8 @@
   });
 
   onMount(async () => {
+    loadSampleCounts();
+    sampleCountsReady = true;
     await refreshStatus();
     await loadCategories();
     await loadMaterials();
@@ -425,7 +458,7 @@
           revision,
           width: previewSize.width,
           height: previewSize.height,
-          samples: 64,
+          samples: previewSamples,
           camera: viewportScene.camera,
         },
         (frame) => {
@@ -469,6 +502,38 @@
     if (active) {
       pathTraceStale = true;
     }
+  }
+
+  function loadSampleCounts() {
+    try {
+      const saved = localStorage.getItem(sampleCountStorageKey);
+      if (!saved) {
+        return;
+      }
+
+      const parsed = JSON.parse(saved) as { previewSamples?: unknown; renderSamples?: unknown };
+      previewSamples = readSampleCount(parsed.previewSamples, previewSamples, 1024);
+      renderSamples = readSampleCount(parsed.renderSamples, renderSamples, 4096);
+      lastScheduledPreviewSamples = previewSamples;
+    } catch {
+      // Ignore malformed local settings; defaults are cheap and predictable.
+    }
+  }
+
+  function saveSampleCounts() {
+    try {
+      localStorage.setItem(sampleCountStorageKey, JSON.stringify({ previewSamples, renderSamples }));
+    } catch {
+      // Local storage can be unavailable in tests or restricted webviews.
+    }
+  }
+
+  function readSampleCount(value: unknown, fallback: number, max: number) {
+    return typeof value === "number" && Number.isFinite(value) ? clampSampleCount(value, max) : fallback;
+  }
+
+  function clampSampleCount(value: number, max: number) {
+    return Math.min(max, Math.max(1, Math.round(value)));
   }
 
   function resetViewportCamera() {
@@ -1016,10 +1081,25 @@
       <span class="truncate">Surface: {status?.selectedSurface.label ?? "Chair Shell"}</span>
       <span class="truncate">Materials: {materials.length}</span>
     </div>
-    <div class="flex items-center gap-4">
-      <span>{resolution.toUpperCase()}</span>
+    <div class="flex shrink-0 items-center gap-1">
+      <SampleCountMenu
+        label="Preview"
+        bind:value={previewSamples}
+        presets={sampleCountPresets}
+        min={1}
+        max={1024}
+        step={1}
+      />
+      <SampleCountMenu
+        label="Render"
+        bind:value={renderSamples}
+        presets={sampleCountPresets}
+        min={1}
+        max={4096}
+        step={1}
+      />
       {#if errorMessage}
-        <span>Attention</span>
+        <span class="ml-2">Attention</span>
       {/if}
     </div>
   </footer>

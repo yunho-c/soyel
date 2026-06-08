@@ -18,6 +18,7 @@ const PREVIEW_WIDTH: u32 = 360;
 const PREVIEW_HEIGHT: u32 = 260;
 const PREVIEW_SAMPLES: u32 = 6;
 const STREAM_PREVIEW_SAMPLES: u32 = 64;
+const MAX_STREAM_PREVIEW_SAMPLES: u32 = 1024;
 const STREAM_FRAME_MAGIC: u32 = 0x4652_5953;
 const STREAM_FRAME_VERSION: u32 = 1;
 const STREAM_FRAME_HEADER_BYTES: usize = 32;
@@ -424,7 +425,9 @@ fn stream_preview_frame(
 
     let width = width.unwrap_or(PREVIEW_WIDTH).clamp(160, 960);
     let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
-    let samples = samples.unwrap_or(STREAM_PREVIEW_SAMPLES).clamp(1, 256);
+    let samples = samples
+        .unwrap_or(STREAM_PREVIEW_SAMPLES)
+        .clamp(1, MAX_STREAM_PREVIEW_SAMPLES);
     let revision = revision.unwrap_or_default();
 
     match panic::catch_unwind(AssertUnwindSafe(|| {
