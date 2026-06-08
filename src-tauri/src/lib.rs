@@ -764,7 +764,7 @@ fn preview_camera_for_request(
     let fallback = || {
         let camera_params = lupin_pt::CameraParams {
             is_orthographic: false,
-            lens: 0.043,
+            lens: lens_from_vertical_fov(0.032, aspect, 42.0),
             aperture: 0.0,
             focus: 3.2,
             film: 0.032,
@@ -805,7 +805,7 @@ fn preview_camera_for_request(
         42.0
     };
     let film = 0.032;
-    let lens = film / (2.0 * (fov_degrees.to_radians() * 0.5).tan());
+    let lens = lens_from_vertical_fov(film, aspect, fov_degrees);
 
     let camera_params = lupin_pt::CameraParams {
         is_orthographic: false,
@@ -820,6 +820,21 @@ fn preview_camera_for_request(
     };
 
     (camera_params, camera_transform)
+}
+
+fn lens_from_vertical_fov(film: f32, aspect: f32, fov_degrees: f32) -> f32 {
+    let safe_aspect = if aspect.is_finite() && aspect > 0.001 {
+        aspect
+    } else {
+        1.0
+    };
+    let vertical_film = if safe_aspect >= 1.0 {
+        film / safe_aspect
+    } else {
+        film
+    };
+
+    vertical_film / (2.0 * (fov_degrees.to_radians() * 0.5).tan())
 }
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -1146,6 +1161,22 @@ mod tests {
     }
 
     #[test]
+    fn preview_camera_preserves_three_vertical_fov_across_aspects() {
+        let camera = default_frontend_preview_camera();
+
+        for aspect in [1.0, 16.0 / 9.0, 9.0 / 16.0] {
+            let (params, _) = preview_camera_for_request(aspect, Some(&camera));
+            let effective_fov = effective_vertical_fov_degrees(&params);
+
+            assert!(
+                (effective_fov - camera.fov_degrees).abs() < 0.001,
+                "aspect {aspect} produced vertical fov {effective_fov}, expected {}",
+                camera.fov_degrees
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
     fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
         let width = 128;
@@ -1209,6 +1240,16 @@ mod tests {
             max_luma,
             unique_rgb_count: unique_rgb.len(),
         }
+    }
+
+    fn effective_vertical_fov_degrees(params: &lupin_pt::CameraParams) -> f32 {
+        let vertical_film = if params.aspect >= 1.0 {
+            params.film / params.aspect
+        } else {
+            params.film
+        };
+
+        (2.0 * (vertical_film / (2.0 * params.lens)).atan()).to_degrees()
     }
 }
 
