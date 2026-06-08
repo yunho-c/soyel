@@ -97,7 +97,25 @@
   let renderSamples = $state(512);
   let lastScheduledPreviewSamples = $state(128);
   let sampleCountsReady = $state(false);
+  type TopSearchCategoryId = "materials" | "environments" | "objects" | "effects";
   type ViewportDisplayMode = "preview" | "ray-traced" | "hybrid";
+
+  const topSearchCategories = [
+    { id: "materials", label: "Materials", color: "#1591dc", icon: CircleDotDashedIcon },
+    { id: "environments", label: "Environments", color: "#306d29", icon: ImageIcon },
+    { id: "objects", label: "Objects", color: "#f69d39", icon: BoxIcon },
+    { id: "effects", label: "Effects", color: "#7ae2cf", icon: SparklesIcon },
+  ] satisfies Array<{
+    id: TopSearchCategoryId;
+    label: string;
+    color: string;
+    icon: typeof SearchIcon;
+  }>;
+
+  let topSearchCategory = $state<TopSearchCategoryId>("materials");
+  let selectedTopSearchCategory = $derived(
+    topSearchCategories.find((item) => item.id === topSearchCategory) ?? topSearchCategories[0],
+  );
 
   const viewportDisplayModes = [
     { value: "preview", label: "Preview" },
@@ -599,12 +617,41 @@
     <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-1/2 -translate-x-1/2 items-center justify-center lg:flex">
       <div class="pointer-events-auto flex h-6 w-full items-center gap-1.5 rounded-sm border bg-background px-1.5">
         <SearchIcon class="size-3.5 text-muted-foreground" />
-        <input
-          bind:value={query}
-          class="h-5 min-w-0 flex-1 bg-transparent text-xs leading-none outline-none placeholder:text-muted-foreground"
-          placeholder="Search"
-          onkeydown={(event) => event.key === "Enter" && loadMaterials()}
-        />
+        <div class="relative min-w-0 flex-1">
+          {#if !query}
+            <div class="pointer-events-none absolute inset-0 flex items-center text-xs leading-none text-muted-foreground">
+              <span>Search&nbsp;</span>
+              <span class="font-medium" style={`color: ${selectedTopSearchCategory.color}`}>
+                {selectedTopSearchCategory.label}
+              </span>
+            </div>
+          {/if}
+          <input
+            bind:value={query}
+            class="relative h-5 w-full min-w-0 bg-transparent text-xs leading-none outline-none"
+            aria-label={`Search ${selectedTopSearchCategory.label}`}
+            onkeydown={(event) => event.key === "Enter" && loadMaterials()}
+          />
+        </div>
+        <div class="flex items-center gap-0.5">
+          {#each topSearchCategories as item}
+            {@const CategoryIcon = item.icon}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              class="size-5 rounded-sm"
+              aria-label={`Search ${item.label}`}
+              aria-pressed={topSearchCategory === item.id}
+              title={item.label}
+              style={`color: ${item.color}`}
+              onclick={() => {
+                topSearchCategory = item.id;
+              }}
+            >
+              <CategoryIcon data-icon="inline-start" />
+            </Button>
+          {/each}
+        </div>
       </div>
     </div>
 
