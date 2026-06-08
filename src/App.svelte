@@ -74,6 +74,8 @@
   let downloaded = $state<DownloadedMaterial | null>(null);
   let previewFrame = $state<RenderPreviewFrame | null>(null);
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
+  let previewHost = $state<HTMLDivElement | null>(null);
+  let previewSize = $state({ width: 360, height: 260 });
   let query = $state("");
   let category = $state("all");
   let sort = $state("popular");
@@ -170,6 +172,32 @@
     if (previewCanvas && previewFrame) {
       paintPreviewFrame(previewCanvas, previewFrame);
     }
+  });
+
+  $effect(() => {
+    if (!previewHost) {
+      return;
+    }
+
+    const host = previewHost;
+    const updatePreviewSize = () => {
+      const next = measurePreviewSize(host);
+      if (next.width === previewSize.width && next.height === previewSize.height) {
+        return;
+      }
+
+      previewSize = next;
+      if (viewportDisplayMode !== "preview") {
+        schedulePreviewFrame(180);
+      }
+    };
+
+    updatePreviewSize();
+
+    const resizeObserver = new ResizeObserver(updatePreviewSize);
+    resizeObserver.observe(host);
+
+    return () => resizeObserver.disconnect();
   });
 
   $effect(() => {
@@ -393,8 +421,8 @@
     try {
       const frame = await renderPreviewFrame({
         revision,
-        width: 360,
-        height: 260,
+        width: previewSize.width,
+        height: previewSize.height,
         samples: 6,
         camera: viewportScene.camera,
       });
@@ -429,6 +457,20 @@
   function resetViewportCamera() {
     viewportScene = withSceneRevision(viewportScene, { camera: { ...defaultCameraState } });
     schedulePreviewFrame(0);
+  }
+
+  function measurePreviewSize(host: HTMLDivElement) {
+    const rect = host.getBoundingClientRect();
+    const cssWidth = Math.max(1, rect.width);
+    const cssHeight = Math.max(1, rect.height);
+    const maxWidth = 960;
+    const maxHeight = 720;
+    const scale = Math.min(1, maxWidth / cssWidth, maxHeight / cssHeight);
+
+    return {
+      width: Math.round(Math.max(160, cssWidth * scale)),
+      height: Math.round(Math.max(120, cssHeight * scale)),
+    };
   }
 
   function paintPreviewFrame(canvas: HTMLCanvasElement, frame: RenderPreviewFrame) {
@@ -710,14 +752,14 @@
                 </Select.Root>
               </div>
 
-              <div class="relative min-h-0 flex-1 overflow-hidden bg-[#121514]">
+              <div class="relative min-h-0 flex-1 overflow-hidden bg-black">
                 <div class="absolute inset-0 opacity-45 [background-image:linear-gradient(rgba(255,255,255,.05)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.05)_1px,transparent_1px)] [background-size:32px_32px]"></div>
                 <div class="absolute inset-x-8 bottom-0 h-1/3 bg-[radial-gradient(ellipse_at_center,rgba(0,0,0,.45),transparent_68%)]"></div>
-                <div class="absolute left-1/2 top-1/2 aspect-[18/13] w-[min(68vw,760px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md border border-white/10 bg-black shadow-2xl">
+                <div bind:this={previewHost} class="absolute inset-0 overflow-hidden bg-black">
                   <canvas
                     bind:this={previewCanvas}
-                    width={previewFrame?.width ?? 360}
-                    height={previewFrame?.height ?? 260}
+                    width={previewFrame?.width ?? previewSize.width}
+                    height={previewFrame?.height ?? previewSize.height}
                     class="absolute inset-0 size-full object-cover transition-opacity duration-200"
                     class:opacity-0={!showPathTracedCanvas}
                     class:opacity-55={showPathTracedCanvas && (pathTraceStale || isViewportInteracting)}
