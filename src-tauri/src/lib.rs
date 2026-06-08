@@ -85,6 +85,64 @@ struct PreviewCamera {
     fov_degrees: f32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SceneSnapshot {
+    revision: u64,
+    cameras: HashMap<String, PreviewCamera>,
+    active_camera_id: String,
+    nodes: HashMap<String, SceneNodeSnapshot>,
+    meshes: HashMap<String, MeshAssetSnapshot>,
+    materials: HashMap<String, MaterialAssetSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SceneNodeSnapshot {
+    id: String,
+    name: String,
+    mesh_id: Option<String>,
+    material_bindings: HashMap<String, String>,
+    transform: SceneTransformSnapshot,
+    visible: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SceneTransformSnapshot {
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshAssetSnapshot {
+    source: MeshSourceSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshSourceSnapshot {
+    primitive: ProceduralMeshPrimitiveSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ProceduralMeshPrimitiveSnapshot {
+    Plane { size: [f32; 2] },
+    Box { size: [f32; 3] },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialAssetSnapshot {
+    base_color: [f32; 4],
+    roughness: f32,
+    metallic: f32,
+    emissive: [f32; 3],
+}
+
 impl RendererStatus {
     fn from_session(session: &RendererSession) -> Self {
         let lupin_material = lupin_pt::Material::default();
@@ -345,6 +403,7 @@ fn render_preview_frame(
     height: Option<u32>,
     samples: Option<u32>,
     camera: Option<PreviewCamera>,
+    scene: Option<SceneSnapshot>,
 ) -> Result<RenderPreviewFrame, String> {
     let (surface_id, surface_label, material) = {
         let session = state
@@ -365,7 +424,15 @@ fn render_preview_frame(
     let samples = samples.unwrap_or(PREVIEW_SAMPLES).clamp(1, 24);
 
     let pixels = match panic::catch_unwind(AssertUnwindSafe(|| {
-        render_lupin_preview(width, height, samples, material.as_ref(), camera.as_ref())
+        render_lupin_preview(
+            width,
+            height,
+            samples,
+            scene.as_ref(),
+            Some(surface_id.as_str()),
+            material.as_ref(),
+            camera.as_ref(),
+        )
     })) {
         Ok(Ok(pixels)) => pixels,
         Ok(Err(error)) => {
@@ -403,6 +470,7 @@ fn stream_preview_frame(
     height: Option<u32>,
     samples: Option<u32>,
     camera: Option<PreviewCamera>,
+    scene: Option<SceneSnapshot>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
     let generation = state
@@ -435,6 +503,8 @@ fn stream_preview_frame(
             width,
             height,
             samples,
+            scene.as_ref(),
+            Some(surface_id.as_str()),
             material.as_ref(),
             camera.as_ref(),
             || state.preview_render_generation.load(Ordering::SeqCst) != generation,
@@ -561,6 +631,8 @@ fn render_lupin_preview(
     width: u32,
     height: u32,
     samples: u32,
+    scene_snapshot: Option<&SceneSnapshot>,
+    material_override_surface_id: Option<&str>,
     material: Option<&PreviewMaterial>,
     camera: Option<&PreviewCamera>,
 ) -> Result<Vec<u8>, String> {
@@ -581,10 +653,12 @@ fn render_lupin_preview(
     let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
         &device,
         &queue,
+        scene_snapshot,
+        material_override_surface_id,
         material,
         width as f32 / height as f32,
         camera,
-    );
+    )?;
 
     let mut output = lupin_pt::DoubleBufferedTexture::create(
         &device,
@@ -674,6 +748,8 @@ fn render_lupin_preview_streaming(
     width: u32,
     height: u32,
     samples: u32,
+    scene_snapshot: Option<&SceneSnapshot>,
+    material_override_surface_id: Option<&str>,
     material: Option<&PreviewMaterial>,
     camera: Option<&PreviewCamera>,
     mut should_cancel: impl FnMut() -> bool,
@@ -696,10 +772,12 @@ fn render_lupin_preview_streaming(
     let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
         &device,
         &queue,
+        scene_snapshot,
+        material_override_surface_id,
         material,
         width as f32 / height as f32,
         camera,
-    );
+    )?;
 
     let mut output = lupin_pt::DoubleBufferedTexture::create(
         &device,
@@ -873,112 +951,21 @@ fn default_wgpu_instance_descriptor() -> lupin_pt::wgpu::InstanceDescriptor {
 fn build_soyel_preview_scene(
     device: &lupin_pt::wgpu::Device,
     queue: &lupin_pt::wgpu::Queue,
+    scene_snapshot: Option<&SceneSnapshot>,
+    material_override_surface_id: Option<&str>,
     material: Option<&PreviewMaterial>,
     aspect: f32,
     camera: Option<&PreviewCamera>,
-) -> (lupin_pt::Scene, lupin_pt::CameraParams, lupin_pt::Mat3x4) {
-    let mut scene = lupin_pt::SceneCPU::default();
-
-    let floor_mat =
-        push_preview_material(&mut scene, preview_material(0.66, 0.65, 0.59, 0.82, 0.0));
-    let ceiling_mat =
-        push_preview_material(&mut scene, preview_material(0.72, 0.71, 0.66, 0.82, 0.0));
-    let back_wall_mat =
-        push_preview_material(&mut scene, preview_material(0.70, 0.69, 0.64, 0.82, 0.0));
-    let left_wall_mat =
-        push_preview_material(&mut scene, preview_material(0.62, 0.22, 0.18, 0.82, 0.0));
-    let right_wall_mat =
-        push_preview_material(&mut scene, preview_material(0.22, 0.52, 0.32, 0.82, 0.0));
-    let sample_block_mat =
-        push_preview_material(&mut scene, preview_material_from_polyhaven(material));
-    let tall_block_mat =
-        push_preview_material(&mut scene, preview_material(0.48, 0.50, 0.47, 0.74, 0.0));
-    let light_mat = push_preview_material(&mut scene, {
-        let mut material = lupin_pt::Material::default();
-        material.emission = lupin_pt::Vec4 {
-            x: 20.0,
-            y: 17.0,
-            z: 12.0,
-            w: 0.0,
-        };
-        material
-    });
-
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(-1.35, 0.0, -1.15),
-            lupin_pt::Vec4::new3(1.35, 0.0, -1.15),
-            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
-            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
-        ],
-        floor_mat,
-    );
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(-1.35, 1.9, -1.15),
-            lupin_pt::Vec4::new3(1.35, 1.9, -1.15),
-            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
-            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
-        ],
-        ceiling_mat,
-    );
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
-            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
-            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
-            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
-        ],
-        back_wall_mat,
-    );
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(-1.35, 0.0, -1.15),
-            lupin_pt::Vec4::new3(-1.35, 0.0, 1.15),
-            lupin_pt::Vec4::new3(-1.35, 1.9, 1.15),
-            lupin_pt::Vec4::new3(-1.35, 1.9, -1.15),
-        ],
-        left_wall_mat,
-    );
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(1.35, 0.0, -1.15),
-            lupin_pt::Vec4::new3(1.35, 0.0, 1.15),
-            lupin_pt::Vec4::new3(1.35, 1.9, 1.15),
-            lupin_pt::Vec4::new3(1.35, 1.9, -1.15),
-        ],
-        right_wall_mat,
-    );
-    push_preview_quad(
-        &mut scene,
-        [
-            lupin_pt::Vec4::new3(-0.34, 1.88, 0.16),
-            lupin_pt::Vec4::new3(0.34, 1.88, 0.16),
-            lupin_pt::Vec4::new3(0.34, 1.88, -0.40),
-            lupin_pt::Vec4::new3(-0.34, 1.88, -0.40),
-        ],
-        light_mat,
-    );
-    push_preview_box(
-        &mut scene,
-        [0.48, 0.275, -0.25],
-        [0.62, 0.55, 0.62],
-        -0.28,
-        sample_block_mat,
-    );
-    push_preview_box(
-        &mut scene,
-        [-0.43, 0.55, 0.28],
-        [0.56, 1.10, 0.56],
-        0.32,
-        tall_block_mat,
-    );
-
+) -> Result<(lupin_pt::Scene, lupin_pt::CameraParams, lupin_pt::Mat3x4), String> {
+    let fallback_scene;
+    let snapshot = match scene_snapshot {
+        Some(scene) => scene,
+        None => {
+            fallback_scene = default_cornell_scene_snapshot();
+            &fallback_scene
+        }
+    };
+    let scene = scene_cpu_from_snapshot(snapshot, material_override_surface_id, material)?;
     lupin_pt::validate_scene(&scene, 0, 0);
     let gpu_scene = lupin_pt::build_accel_structures_and_upload(
         device,
@@ -991,9 +978,248 @@ fn build_soyel_preview_scene(
         true,
     );
 
-    let (camera_params, camera_transform) = preview_camera_for_request(aspect, camera);
+    let scene_camera = camera.or_else(|| active_snapshot_camera(snapshot));
+    let (camera_params, camera_transform) = preview_camera_for_request(aspect, scene_camera);
 
-    (gpu_scene, camera_params, camera_transform)
+    Ok((gpu_scene, camera_params, camera_transform))
+}
+
+fn scene_cpu_from_snapshot(
+    snapshot: &SceneSnapshot,
+    material_override_surface_id: Option<&str>,
+    material_override: Option<&PreviewMaterial>,
+) -> Result<lupin_pt::SceneCPU, String> {
+    let mut scene = lupin_pt::SceneCPU::default();
+    let mut material_indices = HashMap::new();
+    let mut node_ids = snapshot.nodes.keys().cloned().collect::<Vec<_>>();
+    node_ids.sort();
+
+    for node_id in node_ids {
+        let node = &snapshot.nodes[&node_id];
+        if !node.visible {
+            continue;
+        }
+
+        let Some(mesh_id) = node.mesh_id.as_deref() else {
+            continue;
+        };
+        let mesh = snapshot.meshes.get(mesh_id).ok_or_else(|| {
+            format!(
+                "scene node {} ({}) references missing mesh {mesh_id}",
+                node.id, node.name
+            )
+        })?;
+        let material_index = material_index_for_node(
+            &mut scene,
+            &mut material_indices,
+            snapshot,
+            node,
+            material_override_surface_id,
+            material_override,
+        )?;
+
+        match &mesh.source.primitive {
+            ProceduralMeshPrimitiveSnapshot::Plane { size } => {
+                push_snapshot_plane(&mut scene, *size, &node.transform, material_index);
+            }
+            ProceduralMeshPrimitiveSnapshot::Box { size } => {
+                push_snapshot_box(&mut scene, *size, &node.transform, material_index);
+            }
+        }
+    }
+
+    if scene.instances.is_empty() {
+        return Err(format!(
+            "scene snapshot revision {} contains no visible renderable nodes",
+            snapshot.revision
+        ));
+    }
+
+    Ok(scene)
+}
+
+fn material_index_for_node(
+    scene: &mut lupin_pt::SceneCPU,
+    material_indices: &mut HashMap<String, u32>,
+    snapshot: &SceneSnapshot,
+    node: &SceneNodeSnapshot,
+    material_override_surface_id: Option<&str>,
+    material_override: Option<&PreviewMaterial>,
+) -> Result<u32, String> {
+    if material_override_surface_id == Some(node.id.as_str()) {
+        if let Some(material) = material_override {
+            let key = format!("override:{}", node.id);
+            return Ok(*material_indices.entry(key).or_insert_with(|| {
+                push_preview_material(scene, preview_material_from_polyhaven(Some(material)))
+            }));
+        }
+    }
+
+    let Some(material_id) = node.material_bindings.get("default") else {
+        let key = "default:fallback".to_string();
+        return Ok(*material_indices.entry(key).or_insert_with(|| {
+            push_preview_material(scene, preview_material(0.68, 0.73, 0.70, 0.72, 0.0))
+        }));
+    };
+
+    if let Some(index) = material_indices.get(material_id) {
+        return Ok(*index);
+    }
+
+    let material = snapshot.materials.get(material_id).ok_or_else(|| {
+        format!(
+            "scene node {} ({}) references missing material {material_id}",
+            node.id, node.name
+        )
+    })?;
+    let index = push_preview_material(scene, preview_material_from_asset(material));
+    material_indices.insert(material_id.clone(), index);
+    Ok(index)
+}
+
+fn push_snapshot_plane(
+    scene: &mut lupin_pt::SceneCPU,
+    size: [f32; 2],
+    transform: &SceneTransformSnapshot,
+    mat_idx: u32,
+) {
+    let half_width = size[0] * 0.5;
+    let half_height = size[1] * 0.5;
+    push_preview_quad(
+        scene,
+        [
+            transform_point(transform, [-half_width, -half_height, 0.0]),
+            transform_point(transform, [half_width, -half_height, 0.0]),
+            transform_point(transform, [half_width, half_height, 0.0]),
+            transform_point(transform, [-half_width, half_height, 0.0]),
+        ],
+        mat_idx,
+    );
+}
+
+fn push_snapshot_box(
+    scene: &mut lupin_pt::SceneCPU,
+    size: [f32; 3],
+    transform: &SceneTransformSnapshot,
+    mat_idx: u32,
+) {
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let x0 = -half[0];
+    let x1 = half[0];
+    let y0 = -half[1];
+    let y1 = half[1];
+    let z0 = -half[2];
+    let z1 = half[2];
+    let vertex = |x, y, z| transform_point(transform, [x, y, z]);
+
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x1, y0, z0),
+            vertex(x1, y1, z0),
+            vertex(x0, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z1),
+            vertex(x1, y0, z1),
+            vertex(x1, y1, z1),
+            vertex(x0, y1, z1),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x0, y0, z1),
+            vertex(x0, y1, z1),
+            vertex(x0, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x1, y0, z0),
+            vertex(x1, y0, z1),
+            vertex(x1, y1, z1),
+            vertex(x1, y1, z0),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y1, z0),
+            vertex(x1, y1, z0),
+            vertex(x1, y1, z1),
+            vertex(x0, y1, z1),
+        ],
+        mat_idx,
+    );
+    push_preview_quad(
+        scene,
+        [
+            vertex(x0, y0, z0),
+            vertex(x1, y0, z0),
+            vertex(x1, y0, z1),
+            vertex(x0, y0, z1),
+        ],
+        mat_idx,
+    );
+}
+
+fn transform_point(transform: &SceneTransformSnapshot, point: [f32; 3]) -> lupin_pt::Vec4 {
+    let scaled = [
+        point[0] * transform.scale[0],
+        point[1] * transform.scale[1],
+        point[2] * transform.scale[2],
+    ];
+    let rotated = rotate_by_quat(scaled, transform.rotation);
+    lupin_pt::Vec4::new3(
+        rotated[0] + transform.translation[0],
+        rotated[1] + transform.translation[1],
+        rotated[2] + transform.translation[2],
+    )
+}
+
+fn rotate_by_quat(point: [f32; 3], rotation: [f32; 4]) -> [f32; 3] {
+    let length = (rotation[0] * rotation[0]
+        + rotation[1] * rotation[1]
+        + rotation[2] * rotation[2]
+        + rotation[3] * rotation[3])
+        .sqrt();
+    if length < 0.001 || !length.is_finite() {
+        return point;
+    }
+
+    let q = [
+        rotation[0] / length,
+        rotation[1] / length,
+        rotation[2] / length,
+        rotation[3] / length,
+    ];
+    let qv = [q[0], q[1], q[2]];
+    let uv = cross3(qv, point);
+    let uuv = cross3(qv, uv);
+
+    [
+        point[0] + 2.0 * (q[3] * uv[0] + uuv[0]),
+        point[1] + 2.0 * (q[3] * uv[1] + uuv[1]),
+        point[2] + 2.0 * (q[3] * uv[2] + uuv[2]),
+    ]
+}
+
+fn active_snapshot_camera(snapshot: &SceneSnapshot) -> Option<&PreviewCamera> {
+    snapshot
+        .cameras
+        .get(&snapshot.active_camera_id)
+        .or_else(|| snapshot.cameras.values().next())
 }
 
 fn preview_camera_for_request(
@@ -1123,90 +1349,6 @@ fn push_preview_quad(scene: &mut lupin_pt::SceneCPU, verts: [lupin_pt::Vec4; 4],
     });
 }
 
-fn push_preview_box(
-    scene: &mut lupin_pt::SceneCPU,
-    center: [f32; 3],
-    size: [f32; 3],
-    yaw: f32,
-    mat_idx: u32,
-) {
-    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
-    let (sin_yaw, cos_yaw) = yaw.sin_cos();
-    let vertex = |x: f32, y: f32, z: f32| {
-        let rx = x * cos_yaw + z * sin_yaw;
-        let rz = -x * sin_yaw + z * cos_yaw;
-        lupin_pt::Vec4::new3(center[0] + rx, center[1] + y, center[2] + rz)
-    };
-
-    let x0 = -half[0];
-    let x1 = half[0];
-    let y0 = -half[1];
-    let y1 = half[1];
-    let z0 = -half[2];
-    let z1 = half[2];
-
-    push_preview_quad(
-        scene,
-        [
-            vertex(x0, y0, z0),
-            vertex(x1, y0, z0),
-            vertex(x1, y1, z0),
-            vertex(x0, y1, z0),
-        ],
-        mat_idx,
-    );
-    push_preview_quad(
-        scene,
-        [
-            vertex(x0, y0, z1),
-            vertex(x1, y0, z1),
-            vertex(x1, y1, z1),
-            vertex(x0, y1, z1),
-        ],
-        mat_idx,
-    );
-    push_preview_quad(
-        scene,
-        [
-            vertex(x0, y0, z0),
-            vertex(x0, y0, z1),
-            vertex(x0, y1, z1),
-            vertex(x0, y1, z0),
-        ],
-        mat_idx,
-    );
-    push_preview_quad(
-        scene,
-        [
-            vertex(x1, y0, z0),
-            vertex(x1, y0, z1),
-            vertex(x1, y1, z1),
-            vertex(x1, y1, z0),
-        ],
-        mat_idx,
-    );
-    push_preview_quad(
-        scene,
-        [
-            vertex(x0, y1, z0),
-            vertex(x1, y1, z0),
-            vertex(x1, y1, z1),
-            vertex(x0, y1, z1),
-        ],
-        mat_idx,
-    );
-    push_preview_quad(
-        scene,
-        [
-            vertex(x0, y0, z0),
-            vertex(x1, y0, z0),
-            vertex(x1, y0, z1),
-            vertex(x0, y0, z1),
-        ],
-        mat_idx,
-    );
-}
-
 fn preview_material(r: f32, g: f32, b: f32, roughness: f32, metallic: f32) -> lupin_pt::Material {
     let mut material = lupin_pt::Material::default();
     material.color = lupin_pt::Vec4 {
@@ -1221,12 +1363,243 @@ fn preview_material(r: f32, g: f32, b: f32, roughness: f32, metallic: f32) -> lu
     material
 }
 
+fn preview_material_from_asset(material: &MaterialAssetSnapshot) -> lupin_pt::Material {
+    let mut lupin_material = preview_material(
+        material.base_color[0].clamp(0.0, 1.0),
+        material.base_color[1].clamp(0.0, 1.0),
+        material.base_color[2].clamp(0.0, 1.0),
+        material.roughness.clamp(0.02, 1.0),
+        material.metallic.clamp(0.0, 1.0),
+    );
+    lupin_material.emission = lupin_pt::Vec4 {
+        x: material.emissive[0].max(0.0),
+        y: material.emissive[1].max(0.0),
+        z: material.emissive[2].max(0.0),
+        w: 0.0,
+    };
+    lupin_material
+}
+
 fn preview_material_from_polyhaven(material: Option<&PreviewMaterial>) -> lupin_pt::Material {
     let accent = material_preview_color(material.map(|material| material.name.as_str()));
     let roughness = material.map(polyhaven_preview_roughness).unwrap_or(0.46);
     let metallic = material.map(polyhaven_preview_metallic).unwrap_or(0.08);
 
     preview_material(accent.x, accent.y, accent.z, roughness, metallic)
+}
+
+fn default_cornell_scene_snapshot() -> SceneSnapshot {
+    let camera = PreviewCamera {
+        position: [0.0, 0.95, -3.35],
+        target: [0.0, 0.82, 0.1],
+        up: [0.0, 1.0, 0.0],
+        fov_degrees: 42.0,
+    };
+
+    SceneSnapshot {
+        revision: 1,
+        cameras: HashMap::from([("camera-main".to_string(), camera)]),
+        active_camera_id: "camera-main".to_string(),
+        meshes: HashMap::from([
+            ("cornellFloor".to_string(), plane_snapshot([2.7, 2.3])),
+            ("cornellCeiling".to_string(), plane_snapshot([2.7, 2.3])),
+            ("cornellBackWall".to_string(), plane_snapshot([2.7, 1.9])),
+            ("cornellLeftWall".to_string(), plane_snapshot([2.3, 1.9])),
+            ("cornellRightWall".to_string(), plane_snapshot([2.3, 1.9])),
+            ("light".to_string(), plane_snapshot([0.68, 0.56])),
+            ("shortBlock".to_string(), box_snapshot([0.62, 0.55, 0.62])),
+            ("tallBlock".to_string(), box_snapshot([0.56, 1.1, 0.56])),
+        ]),
+        materials: HashMap::from([
+            (
+                "floorMat".to_string(),
+                material_snapshot([0.66, 0.65, 0.59, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "ceilingMat".to_string(),
+                material_snapshot([0.72, 0.71, 0.66, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "backWallMat".to_string(),
+                material_snapshot([0.70, 0.69, 0.64, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "leftWallMat".to_string(),
+                material_snapshot([0.62, 0.22, 0.18, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "rightWallMat".to_string(),
+                material_snapshot([0.22, 0.52, 0.32, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "sampleBlockMat".to_string(),
+                material_snapshot([0.68, 0.73, 0.70, 1.0], 0.46, 0.08, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "tallBlockMat".to_string(),
+                material_snapshot([0.48, 0.50, 0.47, 1.0], 0.74, 0.0, [0.0, 0.0, 0.0]),
+            ),
+            (
+                "lightMat".to_string(),
+                material_snapshot([1.0, 0.88, 0.58, 1.0], 0.28, 0.0, [20.0, 17.0, 12.0]),
+            ),
+        ]),
+        nodes: HashMap::from([
+            (
+                "sample-block".to_string(),
+                node_snapshot(
+                    "sample-block",
+                    "Sample Block",
+                    "shortBlock",
+                    "sampleBlockMat",
+                    [0.48, 0.275, -0.25],
+                    quat_from_euler(0.0, -0.28, 0.0),
+                ),
+            ),
+            (
+                "tall-block".to_string(),
+                node_snapshot(
+                    "tall-block",
+                    "Tall Block",
+                    "tallBlock",
+                    "tallBlockMat",
+                    [-0.43, 0.55, 0.28],
+                    quat_from_euler(0.0, 0.32, 0.0),
+                ),
+            ),
+            (
+                "left-wall".to_string(),
+                node_snapshot(
+                    "left-wall",
+                    "Left Wall",
+                    "cornellLeftWall",
+                    "leftWallMat",
+                    [-1.35, 0.95, 0.0],
+                    quat_from_euler(0.0, std::f32::consts::FRAC_PI_2, 0.0),
+                ),
+            ),
+            (
+                "right-wall".to_string(),
+                node_snapshot(
+                    "right-wall",
+                    "Right Wall",
+                    "cornellRightWall",
+                    "rightWallMat",
+                    [1.35, 0.95, 0.0],
+                    quat_from_euler(0.0, -std::f32::consts::FRAC_PI_2, 0.0),
+                ),
+            ),
+            (
+                "back-wall".to_string(),
+                node_snapshot(
+                    "back-wall",
+                    "Back Wall",
+                    "cornellBackWall",
+                    "backWallMat",
+                    [0.0, 0.95, 1.15],
+                    [0.0, 0.0, 0.0, 1.0],
+                ),
+            ),
+            (
+                "floor".to_string(),
+                node_snapshot(
+                    "floor",
+                    "Floor",
+                    "cornellFloor",
+                    "floorMat",
+                    [0.0, 0.0, 0.0],
+                    quat_from_euler(-std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+                ),
+            ),
+            (
+                "ceiling".to_string(),
+                node_snapshot(
+                    "ceiling",
+                    "Ceiling",
+                    "cornellCeiling",
+                    "ceilingMat",
+                    [0.0, 1.9, 0.0],
+                    quat_from_euler(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+                ),
+            ),
+            (
+                "area-light".to_string(),
+                node_snapshot(
+                    "area-light",
+                    "Area Light",
+                    "light",
+                    "lightMat",
+                    [0.0, 1.88, -0.12],
+                    quat_from_euler(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+                ),
+            ),
+        ]),
+    }
+}
+
+fn plane_snapshot(size: [f32; 2]) -> MeshAssetSnapshot {
+    MeshAssetSnapshot {
+        source: MeshSourceSnapshot {
+            primitive: ProceduralMeshPrimitiveSnapshot::Plane { size },
+        },
+    }
+}
+
+fn box_snapshot(size: [f32; 3]) -> MeshAssetSnapshot {
+    MeshAssetSnapshot {
+        source: MeshSourceSnapshot {
+            primitive: ProceduralMeshPrimitiveSnapshot::Box { size },
+        },
+    }
+}
+
+fn material_snapshot(
+    base_color: [f32; 4],
+    roughness: f32,
+    metallic: f32,
+    emissive: [f32; 3],
+) -> MaterialAssetSnapshot {
+    MaterialAssetSnapshot {
+        base_color,
+        roughness,
+        metallic,
+        emissive,
+    }
+}
+
+fn node_snapshot(
+    id: &str,
+    name: &str,
+    mesh_id: &str,
+    material_id: &str,
+    translation: [f32; 3],
+    rotation: [f32; 4],
+) -> SceneNodeSnapshot {
+    SceneNodeSnapshot {
+        id: id.to_string(),
+        name: name.to_string(),
+        mesh_id: Some(mesh_id.to_string()),
+        material_bindings: HashMap::from([("default".to_string(), material_id.to_string())]),
+        transform: SceneTransformSnapshot {
+            translation,
+            rotation,
+            scale: [1.0, 1.0, 1.0],
+        },
+        visible: true,
+    }
+}
+
+fn quat_from_euler(x: f32, y: f32, z: f32) -> [f32; 4] {
+    let (sx, cx) = (x * 0.5).sin_cos();
+    let (sy, cy) = (y * 0.5).sin_cos();
+    let (sz, cz) = (z * 0.5).sin_cos();
+
+    [
+        sx * cy * cz + cx * sy * sz,
+        cx * sy * cz - sx * cy * sz,
+        cx * cy * sz + sx * sy * cz,
+        cx * cy * cz - sx * sy * sz,
+    ]
 }
 
 fn polyhaven_preview_roughness(material: &PreviewMaterial) -> f32 {
@@ -1442,12 +1815,32 @@ mod tests {
     }
 
     #[test]
+    fn default_scene_snapshot_converts_all_cornell_nodes() {
+        let snapshot = default_cornell_scene_snapshot();
+        let scene = scene_cpu_from_snapshot(&snapshot, None, None).unwrap();
+
+        assert_eq!(snapshot.nodes.len(), 8);
+        assert_eq!(scene.instances.len(), 18);
+        assert_eq!(scene.mesh_infos.len(), 18);
+        assert_eq!(scene.materials.len(), 8);
+        assert!(
+            scene
+                .materials
+                .iter()
+                .any(|material| material.emission.x > 10.0 && material.emission.y > 10.0),
+            "converted scene should preserve the emissive area-light material"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
     fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
         let width = 128;
         let height = 96;
         let camera = default_frontend_preview_camera();
-        let pixels = render_lupin_preview(width, height, 4, None, Some(&camera))?;
+        let scene = default_cornell_scene_snapshot();
+        let pixels =
+            render_lupin_preview(width, height, 4, Some(&scene), None, None, Some(&camera))?;
 
         assert_eq!(pixels.len(), width as usize * height as usize * 4);
 

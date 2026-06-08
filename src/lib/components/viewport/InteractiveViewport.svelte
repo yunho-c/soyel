@@ -5,9 +5,13 @@
 
   import type { AppliedMaterial } from "$lib/materials";
   import {
+    getActiveCamera,
+    getRenderableNodes,
+    getSceneNodeMaterial,
     materialPreviewColor,
     type CameraState,
-    type ViewportObject,
+    type MeshAsset,
+    type SceneNode,
     type ViewportScene,
   } from "$lib/viewport-scene";
 
@@ -22,17 +26,6 @@
     onCameraChange?: (camera: CameraState, active: boolean) => void;
     onInteractionChange?: (active: boolean) => void;
     onSelectSurface?: (id: string, label: string) => void;
-  };
-
-  const defaultSurfaceColors: Record<string, string> = {
-    "sample-block": "#a8b1aa",
-    "tall-block": "#818782",
-    "left-wall": "#a64a42",
-    "right-wall": "#4f8a5f",
-    "back-wall": "#b9b8ad",
-    floor: "#a9a89e",
-    ceiling: "#bab9ad",
-    "area-light": "#ffe4a3",
   };
 
   let {
@@ -66,7 +59,8 @@
   const meshRecords = new Map<
     string,
     {
-      object: ViewportObject;
+      node: SceneNode;
+      meshAsset: MeshAsset;
       group: THREE.Group;
       mesh: THREE.Mesh;
       material: THREE.MeshStandardMaterial;
@@ -82,7 +76,7 @@
       return;
     }
 
-    applyCameraState(viewportScene.camera);
+    applyCameraState(getActiveCamera(viewportScene));
   });
 
   $effect(() => {
@@ -99,7 +93,7 @@
     }
 
     scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(viewportScene.camera.fovDegrees, 1, 0.02, 100);
+    camera = new THREE.PerspectiveCamera(getActiveCamera(viewportScene).fovDegrees, 1, 0.02, 100);
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -145,7 +139,7 @@
     renderer.domElement.addEventListener("dblclick", handleDoubleClick);
 
     updateSceneObjects();
-    applyCameraState(viewportScene.camera);
+    applyCameraState(getActiveCamera(viewportScene));
     resizeToContainer();
     resizeObserver = new ResizeObserver(resizeToContainer);
     resizeObserver.observe(container);
@@ -194,31 +188,36 @@
       return;
     }
 
-    const liveIds = new Set(viewportScene.objects.map((object) => object.id));
+    const renderableNodes = getRenderableNodes(viewportScene);
+    const liveIds = new Set(renderableNodes.map((node) => node.id));
     for (const [id, record] of meshRecords) {
       if (!liveIds.has(id)) {
-        scene.remove(record.group);
-        record.mesh.geometry.dispose();
-        record.material.dispose();
-        record.outline.geometry.dispose();
-        record.outlineMaterial.dispose();
+        disposeRecord(record);
         meshRecords.delete(id);
       }
     }
 
-    for (const object of viewportScene.objects) {
-      let record = meshRecords.get(object.id);
+    for (const node of renderableNodes) {
+      const meshAsset = viewportScene.meshes[node.meshId as string];
+      let record = meshRecords.get(node.id);
+      if (record && record.meshAsset.id !== meshAsset.id) {
+        disposeRecord(record);
+        meshRecords.delete(node.id);
+        record = undefined;
+      }
+
       if (!record) {
-        record = createObjectRecord(object);
-        meshRecords.set(object.id, record);
+        record = createObjectRecord(node, meshAsset);
+        meshRecords.set(node.id, record);
         scene.add(record.group);
       }
 
-      record.object = object;
-      record.group.visible = object.visible;
-      record.group.position.set(...object.transform.translation);
-      record.group.quaternion.set(...object.transform.rotation);
-      record.group.scale.set(...object.transform.scale);
+      record.node = node;
+      record.meshAsset = meshAsset;
+      record.group.visible = node.visible;
+      record.group.position.set(...node.transform.translation);
+      record.group.quaternion.set(...node.transform.rotation);
+      record.group.scale.set(...node.transform.scale);
     }
   }
 
@@ -235,7 +234,12 @@
 
     for (const [id, record] of meshRecords) {
       const applied = appliedBySurface.get(id);
-      const baseColor = applied ? materialPreviewColor(applied.materialName) : defaultSurfaceColors[id] ?? "#9aa39b";
+      const materialAsset = getSceneNodeMaterial(viewportScene, record.node);
+      const baseColor = applied
+        ? materialPreviewColor(applied.materialName)
+        : materialAsset
+          ? colorToCss(materialAsset.baseColor)
+          : "#9aa39b";
       const selected = selectedSurfaceId === id || viewportScene.selection === id;
       const hovered = hoverId === id;
 
@@ -244,8 +248,8 @@
       record.material.opacity = (selected ? 0.95 : 0.76) * fillOpacity;
       record.material.colorWrite = materialWrites;
       record.material.depthWrite = materialWrites;
-      record.material.metalness = 0.04;
-      record.material.roughness = id === "area-light" ? 0.28 : 0.72;
+      record.material.metalness = materialAsset?.metallic ?? 0.04;
+      record.material.roughness = materialAsset?.roughness ?? 0.72;
       record.outline.visible = selected || hovered;
       record.outlineMaterial.color.set(selected ? "#7ff0b2" : "#f6d16b");
     }
@@ -255,19 +259,23 @@
     return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 1));
   }
 
-  function createObjectRecord(object: ViewportObject) {
+  function colorToCss(color: [number, number, number, number]) {
+    return `rgb(${Math.round(color[0] * 255)} ${Math.round(color[1] * 255)} ${Math.round(color[2] * 255)})`;
+  }
+
+  function createObjectRecord(node: SceneNode, meshAsset: MeshAsset) {
+    const materialAsset = getSceneNodeMaterial(viewportScene, node);
     const material = new THREE.MeshStandardMaterial({
-      color: defaultSurfaceColors[object.id] ?? "#9aa39b",
+      color: materialAsset ? colorToCss(materialAsset.baseColor) : "#9aa39b",
       side: THREE.DoubleSide,
       transparent: true,
       opacity: 0.76,
-      roughness: 0.72,
-      metalness: 0.04,
+      roughness: materialAsset?.roughness ?? 0.72,
+      metalness: materialAsset?.metallic ?? 0.04,
     });
-    const geometry = createProxyGeometry(object.meshId);
+    const geometry = createProxyGeometry(meshAsset);
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.userData = { surfaceId: object.id, label: object.label };
-    applyProxyPose(mesh, object.meshId);
+    mesh.userData = { surfaceId: node.id, label: node.name };
 
     const outlineMaterial = new THREE.LineBasicMaterial({
       color: "#7ff0b2",
@@ -279,69 +287,36 @@
     outline.userData = mesh.userData;
     outline.renderOrder = 10;
     outline.visible = false;
-    applyProxyPose(outline, object.meshId);
 
     const group = new THREE.Group();
     group.add(mesh);
     group.add(outline);
 
-    return { object, group, mesh, material, outline, outlineMaterial };
+    return { node, meshAsset, group, mesh, material, outline, outlineMaterial };
   }
 
-  function createProxyGeometry(meshId: ViewportObject["meshId"]) {
-    switch (meshId) {
-      case "cornellFloor":
-      case "cornellCeiling":
-        return new THREE.PlaneGeometry(2.7, 2.3);
-      case "cornellBackWall":
-        return new THREE.PlaneGeometry(2.7, 1.9);
-      case "cornellLeftWall":
-      case "cornellRightWall":
-        return new THREE.PlaneGeometry(2.3, 1.9);
-      case "light":
-        return new THREE.PlaneGeometry(0.68, 0.56);
-      case "tallBlock":
-        return new THREE.BoxGeometry(0.56, 1.1, 0.56);
-      case "shortBlock":
-      default:
-        return new THREE.BoxGeometry(0.62, 0.55, 0.62);
+  function createProxyGeometry(meshAsset: MeshAsset) {
+    const primitive = meshAsset.source.primitive;
+    switch (primitive.type) {
+      case "plane":
+        return new THREE.PlaneGeometry(primitive.size[0], primitive.size[1]);
+      case "box":
+        return new THREE.BoxGeometry(primitive.size[0], primitive.size[1], primitive.size[2]);
     }
   }
 
-  function applyProxyPose(object: THREE.Object3D, meshId: ViewportObject["meshId"]) {
-    switch (meshId) {
-      case "cornellFloor":
-        object.position.set(0, 0, 0);
-        object.rotation.set(-Math.PI / 2, 0, 0);
-        break;
-      case "cornellCeiling":
-        object.position.set(0, 1.9, 0);
-        object.rotation.set(Math.PI / 2, 0, 0);
-        break;
-      case "cornellBackWall":
-        object.position.set(0, 0.95, 1.15);
-        break;
-      case "cornellLeftWall":
-        object.position.set(-1.35, 0.95, 0);
-        object.rotation.set(0, Math.PI / 2, 0);
-        break;
-      case "cornellRightWall":
-        object.position.set(1.35, 0.95, 0);
-        object.rotation.set(0, -Math.PI / 2, 0);
-        break;
-      case "light":
-        object.position.set(0, 1.88, -0.12);
-        object.rotation.set(Math.PI / 2, 0, 0);
-        break;
-      case "tallBlock":
-        object.position.set(-0.43, 0.55, 0.28);
-        object.rotation.set(0, 0.32, 0);
-        break;
-      case "shortBlock":
-        object.position.set(0.48, 0.275, -0.25);
-        object.rotation.set(0, -0.28, 0);
-        break;
-    }
+  function disposeRecord(record: {
+    group: THREE.Group;
+    mesh: THREE.Mesh;
+    material: THREE.MeshStandardMaterial;
+    outline: THREE.LineSegments;
+    outlineMaterial: THREE.LineBasicMaterial;
+  }) {
+    scene?.remove(record.group);
+    record.mesh.geometry.dispose();
+    record.material.dispose();
+    record.outline.geometry.dispose();
+    record.outlineMaterial.dispose();
   }
 
   function applyCameraState(state: CameraState) {
@@ -494,7 +469,7 @@
     </div>
     {#if hoverId}
       <div class="rounded-md border border-white/15 bg-black/35 px-2.5 py-1.5 text-[0.68rem] text-white/70 backdrop-blur">
-        {meshRecords.get(hoverId)?.object.label}
+        {meshRecords.get(hoverId)?.node.name}
       </div>
     {/if}
   </div>

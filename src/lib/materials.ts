@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import type { CameraState } from "$lib/viewport-scene";
+import type { CameraState, SoyelScene } from "$lib/viewport-scene";
 
 export type SurfaceSelection = {
   id: string;
@@ -102,6 +102,7 @@ export type RenderPreviewRequest = {
   height?: number;
   samples?: number;
   camera?: CameraState;
+  scene?: SoyelScene;
 };
 
 export type RenderPreviewStreamFrame = RenderPreviewFrame & {

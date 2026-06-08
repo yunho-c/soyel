@@ -55,8 +55,14 @@
   import {
     createDefaultViewportScene,
     defaultCameraState,
+    getActiveCamera,
+    getSelectableNodes,
+    materialPreviewBaseColor,
+    withActiveCamera,
+    withNodeMaterial,
     withSceneRevision,
     type CameraState,
+    type MaterialAsset,
   } from "$lib/viewport-scene";
   import {
     loadWorkspaceLayout,
@@ -165,16 +171,24 @@
     icon: typeof TerminalIcon;
   }>;
 
-  const surfaces = [
-    { id: "sample-block", label: "Sample Block", meta: "Material target", icon: CuboidIcon },
-    { id: "tall-block", label: "Tall Block", meta: "Reference object", icon: BoxIcon },
-    { id: "left-wall", label: "Left Wall", meta: "Red wall", icon: Layers3Icon },
-    { id: "right-wall", label: "Right Wall", meta: "Green wall", icon: Layers3Icon },
-    { id: "back-wall", label: "Back Wall", meta: "Diffuse wall", icon: Layers3Icon },
-    { id: "floor", label: "Floor", meta: "Diffuse floor", icon: Grid3X3Icon },
-    { id: "ceiling", label: "Ceiling", meta: "Diffuse ceiling", icon: Layers3Icon },
-    { id: "area-light", label: "Area Light", meta: "Emitter", icon: CircleDotDashedIcon },
-  ];
+  const surfaceMetadata: Record<string, { meta: string; icon: typeof CircleDotDashedIcon }> = {
+    "sample-block": { meta: "Material target", icon: CuboidIcon },
+    "tall-block": { meta: "Reference object", icon: BoxIcon },
+    "left-wall": { meta: "Red wall", icon: Layers3Icon },
+    "right-wall": { meta: "Green wall", icon: Layers3Icon },
+    "back-wall": { meta: "Diffuse wall", icon: Layers3Icon },
+    floor: { meta: "Diffuse floor", icon: Grid3X3Icon },
+    ceiling: { meta: "Diffuse ceiling", icon: Layers3Icon },
+    "area-light": { meta: "Emitter", icon: CircleDotDashedIcon },
+  };
+  let surfaces = $derived(
+    getSelectableNodes(viewportScene).map((node) => ({
+      id: node.id,
+      label: node.name,
+      meta: surfaceMetadata[node.id]?.meta ?? "Scene node",
+      icon: surfaceMetadata[node.id]?.icon ?? Layers3Icon,
+    })),
+  );
 
   const roleLabels: Record<string, string> = {
     baseColor: "Base color",
@@ -375,6 +389,7 @@
 
     isApplying = true;
     errorMessage = "";
+    const selectedSurfaceId = viewportScene.selection ?? status?.selectedSurface.id ?? "sample-block";
 
     try {
       status = await applyMaterialToSelection({
@@ -385,6 +400,11 @@
         authors: selectedMaterial.authors,
         maps: selectedFiles,
       });
+      viewportScene = withNodeMaterial(
+        viewportScene,
+        selectedSurfaceId,
+        materialAssetFromSelection(selectedMaterial, selectedFiles),
+      );
       schedulePreviewFrame(80);
     } catch (error) {
       errorMessage = String(error);
@@ -477,7 +497,8 @@
           width: previewSize.width,
           height: previewSize.height,
           samples: previewSamples,
-          camera: viewportScene.camera,
+          camera: getActiveCamera(viewportScene),
+          scene: viewportScene,
         },
         (frame) => {
           if (request !== activePreviewRequest || frame.revision !== viewportScene.revision) {
@@ -510,7 +531,7 @@
   }
 
   function handleViewportCameraChange(camera: CameraState, active: boolean) {
-    viewportScene = withSceneRevision(viewportScene, { camera });
+    viewportScene = withActiveCamera(viewportScene, camera);
     pathTraceStale = true;
     schedulePreviewFrame(active ? 320 : 120);
   }
@@ -555,8 +576,62 @@
   }
 
   function resetViewportCamera() {
-    viewportScene = withSceneRevision(viewportScene, { camera: { ...defaultCameraState } });
+    viewportScene = withActiveCamera(viewportScene, { ...defaultCameraState });
     schedulePreviewFrame(0);
+  }
+
+  function materialAssetFromSelection(material: PolyHavenMaterial, files: MaterialFile[]): MaterialAsset {
+    const roughness = estimatePreviewRoughness(material, files);
+    const metallic = hasRole(files, "metallic") || hasCategory(material, "metal") ? 0.78 : 0.04;
+
+    return {
+      id: `polyhaven:${material.id}`,
+      name: material.name,
+      model: "gltf-pbr",
+      baseColor: materialPreviewBaseColor(material.name),
+      roughness,
+      metallic,
+      emissive: [0, 0, 0],
+      textureRefs: Object.fromEntries(
+        files.map((file) => [
+          file.role,
+          {
+            uri: file.url,
+            colorSpace: file.role === "baseColor" ? "srgb" : "linear",
+          },
+        ]),
+      ),
+    };
+  }
+
+  function estimatePreviewRoughness(material: PolyHavenMaterial, files: MaterialFile[]) {
+    let roughness =
+      hasCategory(material, "fabric") ||
+      hasCategory(material, "brick") ||
+      hasCategory(material, "rock") ||
+      hasCategory(material, "terrain")
+        ? 0.82
+        : hasCategory(material, "wood")
+          ? 0.62
+          : hasCategory(material, "metal")
+            ? 0.34
+            : 0.56;
+
+    if (hasRole(files, "normal") || hasRole(files, "displacement")) {
+      roughness = Math.min(0.92, roughness + 0.08);
+    }
+
+    return hasRole(files, "roughness") || hasRole(files, "occlusionRoughnessMetallic")
+      ? roughness
+      : (roughness + 0.46) * 0.5;
+  }
+
+  function hasRole(files: MaterialFile[], role: string) {
+    return files.some((file) => file.role === role);
+  }
+
+  function hasCategory(material: PolyHavenMaterial, category: string) {
+    return material.categories.some((value) => value.toLowerCase().includes(category));
   }
 
   function measurePreviewSize(host: HTMLDivElement) {
