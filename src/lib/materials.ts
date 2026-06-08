@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type { CameraState } from "$lib/viewport-scene";
 
@@ -93,7 +93,7 @@ export type RenderPreviewFrame = {
   samples: number;
   surfaceLabel: string;
   materialName?: string;
-  pixels: number[];
+  pixels: number[] | Uint8Array;
 };
 
 export type RenderPreviewRequest = {
@@ -103,6 +103,15 @@ export type RenderPreviewRequest = {
   samples?: number;
   camera?: CameraState;
 };
+
+export type RenderPreviewStreamFrame = RenderPreviewFrame & {
+  requestedSamples: number;
+  final: boolean;
+};
+
+const STREAM_FRAME_MAGIC = 0x4652_5953;
+const STREAM_FRAME_HEADER_BYTES = 32;
+const STREAM_FRAME_FINAL = 1;
 
 const mockFiles: MaterialFile[] = [
   {
@@ -326,6 +335,67 @@ export async function renderPreviewFrame(args: RenderPreviewRequest) {
   }
 
   return invoke<RenderPreviewFrame>("render_preview_frame", args);
+}
+
+export async function streamPreviewFrame(
+  args: RenderPreviewRequest,
+  onFrame: (frame: RenderPreviewStreamFrame) => void,
+) {
+  if (!hasTauriRuntime()) {
+    onFrame({
+      ...mockPreviewFrame,
+      revision: args.revision ?? mockPreviewFrame.revision,
+      width: args.width ?? mockPreviewFrame.width,
+      height: args.height ?? mockPreviewFrame.height,
+      surfaceLabel: mockStatus.selectedSurface.label,
+      materialName: mockStatus.appliedMaterials.find((item) => item.surfaceId === mockStatus.selectedSurface.id)
+        ?.materialName,
+      requestedSamples: args.samples ?? mockPreviewFrame.samples,
+      final: true,
+    });
+    return;
+  }
+
+  const onFrameChannel = new Channel<ArrayBuffer | Uint8Array>();
+  onFrameChannel.onmessage = (message) => {
+    const frame = parseStreamPreviewFrame(message);
+    if (frame) {
+      onFrame(frame);
+    }
+  };
+
+  await invoke<void>("stream_preview_frame", { ...args, onFrame: onFrameChannel });
+}
+
+function parseStreamPreviewFrame(message: ArrayBuffer | Uint8Array): RenderPreviewStreamFrame | null {
+  const bytes = message instanceof Uint8Array ? message : new Uint8Array(message);
+  if (bytes.byteLength < STREAM_FRAME_HEADER_BYTES) {
+    return null;
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = view.getUint32(0, true);
+  if (magic !== STREAM_FRAME_MAGIC) {
+    return null;
+  }
+
+  const revision = view.getUint32(8, true);
+  const width = view.getUint32(12, true);
+  const height = view.getUint32(16, true);
+  const samples = view.getUint32(20, true);
+  const requestedSamples = view.getUint32(24, true);
+  const flags = view.getUint32(28, true);
+
+  return {
+    revision,
+    width,
+    height,
+    samples,
+    requestedSamples,
+    final: (flags & STREAM_FRAME_FINAL) !== 0,
+    surfaceLabel: "",
+    pixels: bytes.subarray(STREAM_FRAME_HEADER_BYTES),
+  };
 }
 
 export async function downloadPolyHavenMaterial(id: string, resolution: string, roles: string[]) {

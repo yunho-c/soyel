@@ -2,22 +2,32 @@ use std::{
     collections::{BTreeSet, HashMap},
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 const POLYHAVEN_API: &str = "https://api.polyhaven.com";
 const POLYHAVEN_USER_AGENT: &str = "soyel-renderer/0.1 (Poly Haven material discovery)";
 const PREVIEW_WIDTH: u32 = 360;
 const PREVIEW_HEIGHT: u32 = 260;
 const PREVIEW_SAMPLES: u32 = 6;
+const STREAM_PREVIEW_SAMPLES: u32 = 64;
+const STREAM_FRAME_MAGIC: u32 = 0x4652_5953;
+const STREAM_FRAME_VERSION: u32 = 1;
+const STREAM_FRAME_HEADER_BYTES: usize = 32;
+const STREAM_FRAME_FINAL: u32 = 1;
 
 #[derive(Debug)]
 struct AppState {
     renderer: Mutex<RendererSession>,
     polyhaven: reqwest::Client,
+    preview_render_generation: AtomicU64,
 }
 
 impl AppState {
@@ -30,6 +40,7 @@ impl AppState {
         Self {
             renderer: Mutex::new(RendererSession::default()),
             polyhaven,
+            preview_render_generation: AtomicU64::new(0),
         }
     }
 }
@@ -383,6 +394,75 @@ fn render_preview_frame(
     })
 }
 
+#[tauri::command]
+fn stream_preview_frame(
+    state: tauri::State<'_, AppState>,
+    revision: Option<u64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    samples: Option<u32>,
+    camera: Option<PreviewCamera>,
+    on_frame: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    let generation = state
+        .preview_render_generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let (surface_id, material) = {
+        let session = state
+            .renderer
+            .lock()
+            .map_err(|_| "renderer session lock poisoned".to_string())?;
+        let surface = session.selected_surface.clone();
+        let applied = session
+            .applied_materials
+            .get(&surface.id)
+            .map(PreviewMaterial::from);
+
+        (surface.id, applied)
+    };
+
+    let width = width.unwrap_or(PREVIEW_WIDTH).clamp(160, 960);
+    let height = height.unwrap_or(PREVIEW_HEIGHT).clamp(120, 720);
+    let samples = samples.unwrap_or(STREAM_PREVIEW_SAMPLES).clamp(1, 256);
+    let revision = revision.unwrap_or_default();
+
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        render_lupin_preview_streaming(
+            width,
+            height,
+            samples,
+            material.as_ref(),
+            camera.as_ref(),
+            || state.preview_render_generation.load(Ordering::SeqCst) != generation,
+            |completed_samples, pixels, final_frame| {
+                let packet = stream_preview_frame_packet(
+                    revision,
+                    width,
+                    height,
+                    completed_samples,
+                    samples,
+                    final_frame,
+                    pixels,
+                );
+                on_frame
+                    .send(InvokeResponseBody::Raw(packet))
+                    .map_err(|error| error.to_string())
+            },
+        )
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = format!(
+                "Lupin preview render crashed for {surface_id}: {}",
+                panic_payload_to_string(payload.as_ref())
+            );
+            eprintln!("[soyel] {message}");
+            Err(message)
+        }
+    }
+}
+
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_string();
@@ -585,6 +665,162 @@ fn render_lupin_preview(
     );
 
     read_rgba8_texture(&device, &queue, &tonemapped, width, height)
+}
+
+fn render_lupin_preview_streaming(
+    width: u32,
+    height: u32,
+    samples: u32,
+    material: Option<&PreviewMaterial>,
+    camera: Option<&PreviewCamera>,
+    mut should_cancel: impl FnMut() -> bool,
+    mut emit_frame: impl FnMut(u32, Vec<u8>, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    use lupin_pt::wgpu;
+
+    ensure_lupin_preview_supported()?;
+
+    let (device, queue, _) = lupin_pt::init_default_wgpu_context_no_window();
+    let pathtrace_resources = lupin_pt::build_pathtrace_resources(
+        &device,
+        &lupin_pt::BakedPathtraceParams {
+            with_runtime_checks: false,
+            max_bounces: 4,
+            samples_per_pixel: 1,
+        },
+    );
+    let tonemap_resources = lupin_pt::build_tonemap_resources(&device);
+    let (scene, camera_params, camera_transform) = build_soyel_preview_scene(
+        &device,
+        &queue,
+        material,
+        width as f32 / height as f32,
+        camera,
+    );
+
+    let mut output = lupin_pt::DoubleBufferedTexture::create(
+        &device,
+        &wgpu::TextureDescriptor {
+            label: Some("Soyel Lupin streaming preview HDR output"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        },
+    );
+
+    let tonemapped = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Soyel Lupin streaming preview RGBA output"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    for accum_counter in 0..samples {
+        if should_cancel() {
+            return Ok(());
+        }
+
+        lupin_pt::pathtrace_scene(
+            &device,
+            &queue,
+            &pathtrace_resources,
+            &scene,
+            output.front(),
+            Default::default(),
+            &lupin_pt::PathtraceDesc {
+                accum_params: Some(lupin_pt::AccumulationParams {
+                    prev_frame: output.back(),
+                    accum_counter,
+                }),
+                tile_params: None,
+                camera_params,
+                camera_transform,
+                force_software_bvh: true,
+                advanced: lupin_pt::AdvancedParams {
+                    max_radiance: 12.0,
+                    ..Default::default()
+                },
+            },
+        );
+
+        let completed_samples = accum_counter + 1;
+        let final_frame = completed_samples == samples;
+        if should_emit_stream_preview_frame(completed_samples, samples) {
+            lupin_pt::tonemap_and_fit_aspect(
+                &device,
+                &queue,
+                &tonemap_resources,
+                output.front(),
+                &tonemapped,
+                &lupin_pt::TonemapDesc {
+                    viewport: None,
+                    exposure: 0.0,
+                    filmic: true,
+                    srgb: true,
+                    clear: true,
+                },
+            );
+
+            let pixels = read_rgba8_texture(&device, &queue, &tonemapped, width, height)?;
+            emit_frame(completed_samples, pixels, final_frame)?;
+        }
+
+        output.flip();
+    }
+
+    Ok(())
+}
+
+fn should_emit_stream_preview_frame(completed_samples: u32, total_samples: u32) -> bool {
+    completed_samples == total_samples || completed_samples.is_power_of_two()
+}
+
+fn stream_preview_frame_packet(
+    revision: u64,
+    width: u32,
+    height: u32,
+    completed_samples: u32,
+    total_samples: u32,
+    final_frame: bool,
+    pixels: Vec<u8>,
+) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(STREAM_FRAME_HEADER_BYTES + pixels.len());
+    for value in [
+        STREAM_FRAME_MAGIC,
+        STREAM_FRAME_VERSION,
+        revision.min(u32::MAX as u64) as u32,
+        width,
+        height,
+        completed_samples,
+        total_samples,
+        if final_frame { STREAM_FRAME_FINAL } else { 0 },
+    ] {
+        packet.extend_from_slice(&value.to_le_bytes());
+    }
+    packet.extend_from_slice(&pixels);
+    packet
 }
 
 fn ensure_lupin_preview_supported() -> Result<(), String> {
@@ -1177,6 +1413,32 @@ mod tests {
     }
 
     #[test]
+    fn stream_preview_packet_contains_header_and_pixels() {
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let packet = stream_preview_frame_packet(7, 2, 1, 4, 64, true, pixels.clone());
+
+        assert_eq!(packet.len(), STREAM_FRAME_HEADER_BYTES + pixels.len());
+        assert_eq!(
+            u32::from_le_bytes(packet[0..4].try_into().unwrap()),
+            STREAM_FRAME_MAGIC
+        );
+        assert_eq!(
+            u32::from_le_bytes(packet[4..8].try_into().unwrap()),
+            STREAM_FRAME_VERSION
+        );
+        assert_eq!(u32::from_le_bytes(packet[8..12].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(packet[12..16].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(packet[16..20].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(packet[20..24].try_into().unwrap()), 4);
+        assert_eq!(u32::from_le_bytes(packet[24..28].try_into().unwrap()), 64);
+        assert_eq!(
+            u32::from_le_bytes(packet[28..32].try_into().unwrap()),
+            STREAM_FRAME_FINAL
+        );
+        assert_eq!(&packet[STREAM_FRAME_HEADER_BYTES..], pixels.as_slice());
+    }
+
+    #[test]
     #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
     fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
         let width = 128;
@@ -1628,6 +1890,7 @@ pub fn run() {
             select_scene_surface,
             apply_material_to_selection,
             render_preview_frame,
+            stream_preview_frame,
             polyhaven_search_materials,
             polyhaven_texture_categories,
             polyhaven_material_files,

@@ -40,10 +40,10 @@
     downloadPolyHavenMaterial,
     polyHavenMaterialFiles,
     polyHavenTextureCategories,
-    renderPreviewFrame,
     rendererStatus,
     searchPolyHavenMaterials,
     selectSceneSurface,
+    streamPreviewFrame,
     type DownloadedMaterial,
     type MaterialFile,
     type PolyHavenCategory,
@@ -89,6 +89,7 @@
   let errorMessage = $state("");
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
+  let activePreviewRequest = 0;
   type ViewportDisplayMode = "preview" | "ray-traced" | "hybrid";
 
   const viewportDisplayModes = [
@@ -107,12 +108,10 @@
   let showPathTracedCanvas = $derived(viewportDisplayMode !== "preview" && hasPathTracedPixels);
   let showRasterViewport = $derived(
     viewportDisplayMode === "preview" ||
-      (viewportDisplayMode === "hybrid" && (pathTraceStale || isViewportInteracting || !hasPathTracedPixels)),
+      (viewportDisplayMode === "hybrid" && (isViewportInteracting || !hasPathTracedPixels)),
   );
   let showInteractiveViewport = $derived(viewportDisplayMode !== "ray-traced");
-  let rasterFillOpacity = $derived(
-    showRasterViewport ? 1 : 0,
-  );
+  let rasterFillOpacity = $derived(showRasterViewport ? 1 : 0);
   let rasterGuideOpacity = $derived(showRasterViewport ? 1 : 0);
   let showRayTraceNotice = $derived(
     viewportDisplayMode === "ray-traced" && !isRendering && !hasPathTracedPixels,
@@ -412,6 +411,8 @@
   }
 
   async function refreshPreviewFrame(revision = viewportScene.revision) {
+    const request = activePreviewRequest + 1;
+    activePreviewRequest = request;
     isRendering = true;
     errorMessage = "";
     previewError = "";
@@ -419,23 +420,39 @@
     activePreviewRevision = revision;
 
     try {
-      const frame = await renderPreviewFrame({
-        revision,
-        width: previewSize.width,
-        height: previewSize.height,
-        samples: 6,
-        camera: viewportScene.camera,
-      });
+      await streamPreviewFrame(
+        {
+          revision,
+          width: previewSize.width,
+          height: previewSize.height,
+          samples: 64,
+          camera: viewportScene.camera,
+        },
+        (frame) => {
+          if (request !== activePreviewRequest || frame.revision !== viewportScene.revision) {
+            return;
+          }
 
-      if (frame.revision === viewportScene.revision) {
-        previewFrame = frame;
-        pathTraceStale = false;
-      }
+          const surfaceLabel = status?.selectedSurface.label ?? frame.surfaceLabel;
+          const materialName = status
+            ? appliedForSurface(status.selectedSurface.id)?.materialName
+            : frame.materialName;
+
+          previewFrame = {
+            ...frame,
+            surfaceLabel,
+            materialName,
+          };
+          pathTraceStale = !frame.final;
+        },
+      );
     } catch (error) {
-      previewError = String(error);
-      errorMessage = previewError;
+      if (request === activePreviewRequest) {
+        previewError = String(error);
+        errorMessage = previewError;
+      }
     } finally {
-      if (activePreviewRevision === revision) {
+      if (request === activePreviewRequest && activePreviewRevision === revision) {
         isRendering = false;
       }
     }
@@ -762,7 +779,7 @@
                     height={previewFrame?.height ?? previewSize.height}
                     class="absolute inset-0 size-full object-cover transition-opacity duration-200"
                     class:opacity-0={!showPathTracedCanvas}
-                    class:opacity-55={showPathTracedCanvas && (pathTraceStale || isViewportInteracting)}
+                    class:opacity-55={showPathTracedCanvas && isViewportInteracting}
                     aria-label="Lupin rendered preview"
                   ></canvas>
                   {#if showInteractiveViewport}
