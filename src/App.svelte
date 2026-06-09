@@ -87,6 +87,7 @@
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
   let previewHost = $state<HTMLDivElement | null>(null);
   let sceneFileInput = $state<HTMLInputElement | null>(null);
+  let rasterSceneInstance = $state(0);
   let previewSize = $state({ width: 360, height: 260 });
   let query = $state("");
   let category = $state("all");
@@ -419,8 +420,16 @@
 
     try {
       const importedScene = await importGltfScene(file, files ?? [file]);
-      viewportScene = importedScene;
+      const revision = viewportScene.revision + 1;
+      activePreviewRequest += 1;
+      activePreviewRevision = revision;
+      viewportScene = {
+        ...importedScene,
+        revision,
+      };
+      rasterSceneInstance += 1;
       previewFrame = null;
+      clearPreviewCanvas();
       pathTraceStale = true;
 
       if (importedScene.selection) {
@@ -732,6 +741,15 @@
     const imageData = context.createImageData(frame.width, frame.height);
     imageData.data.set(frame.pixels);
     context.putImageData(imageData, 0, 0);
+  }
+
+  function clearPreviewCanvas() {
+    if (!previewCanvas) {
+      return;
+    }
+
+    const context = previewCanvas.getContext("2d");
+    context?.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
   }
 
   function paintBrowserPreview(context: CanvasRenderingContext2D, frame: RenderPreviewFrame) {
@@ -1080,18 +1098,20 @@
                     aria-label="Lupin rendered preview"
                   ></canvas>
                   {#if showInteractiveViewport}
-                    <InteractiveViewport
-                      viewportScene={viewportScene}
-                      selectedSurfaceId={viewportScene.selection ?? status?.selectedSurface.id}
-                      appliedMaterials={status?.appliedMaterials ?? []}
-                      isRendering={isRendering}
-                      isPathTraceStale={pathTraceStale || isViewportInteracting}
-                      rasterFillOpacity={rasterFillOpacity}
-                      rasterGuideOpacity={rasterGuideOpacity}
-                      onCameraChange={handleViewportCameraChange}
-                      onInteractionChange={handleViewportInteractionChange}
-                      onSelectSurface={selectSurface}
-                    />
+                    {#key rasterSceneInstance}
+                      <InteractiveViewport
+                        viewportScene={viewportScene}
+                        selectedSurfaceId={viewportScene.selection ?? status?.selectedSurface.id}
+                        appliedMaterials={status?.appliedMaterials ?? []}
+                        isRendering={isRendering}
+                        isPathTraceStale={pathTraceStale || isViewportInteracting}
+                        rasterFillOpacity={rasterFillOpacity}
+                        rasterGuideOpacity={rasterGuideOpacity}
+                        onCameraChange={handleViewportCameraChange}
+                        onInteractionChange={handleViewportInteractionChange}
+                        onSelectSurface={selectSurface}
+                      />
+                    {/key}
                   {/if}
                   {#if showRayTraceNotice}
                     <div class="pointer-events-none absolute inset-0 grid place-items-center bg-black/75 px-8 text-center text-sm text-white/70">
