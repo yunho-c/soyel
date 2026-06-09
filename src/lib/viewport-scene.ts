@@ -25,13 +25,27 @@ export type ProceduralMeshPrimitive =
   | { type: "plane"; size: Vec2 }
   | { type: "box"; size: Vec3 };
 
+export type TriangleMeshAsset = {
+  positions: number[];
+  normals?: number[];
+  uvs?: number[];
+  indices: number[];
+};
+
+export type MeshSource =
+  | {
+      type: "procedural";
+      primitive: ProceduralMeshPrimitive;
+    }
+  | {
+      type: "triangleMesh";
+      geometry: TriangleMeshAsset;
+    };
+
 export type MeshAsset = {
   id: string;
   name: string;
-  source: {
-    type: "procedural";
-    primitive: ProceduralMeshPrimitive;
-  };
+  source: MeshSource;
   bounds?: {
     min: Vec3;
     max: Vec3;
@@ -229,13 +243,56 @@ export function withNodeMaterial(scene: SoyelScene, nodeId: string, material: Ma
   });
 }
 
+export function withNodeVisibility(scene: SoyelScene, nodeId: string, visible: boolean) {
+  const node = scene.nodes[nodeId];
+  if (!node || node.visible === visible) {
+    return scene;
+  }
+
+  return withSceneRevision(scene, {
+    nodes: {
+      ...scene.nodes,
+      [nodeId]: {
+        ...node,
+        visible,
+      },
+    },
+  });
+}
+
 export function getSceneNodeMaterial(scene: SoyelScene, node: SceneNode) {
   const materialId = node.materialBindings.default;
   return materialId ? scene.materials[materialId] : undefined;
 }
 
+export function isNodeEffectivelyVisible(scene: SoyelScene, node: SceneNode) {
+  let current: SceneNode | undefined = node;
+  const visited = new Set<string>();
+
+  while (current) {
+    if (!current.visible) {
+      return false;
+    }
+
+    if (!current.parentId) {
+      return true;
+    }
+
+    if (visited.has(current.parentId)) {
+      return false;
+    }
+
+    visited.add(current.id);
+    current = scene.nodes[current.parentId];
+  }
+
+  return true;
+}
+
 export function getRenderableNodes(scene: SoyelScene) {
-  return Object.values(scene.nodes).filter((node) => node.visible && node.meshId && scene.meshes[node.meshId]);
+  return Object.values(scene.nodes).filter(
+    (node) => isNodeEffectivelyVisible(scene, node) && node.meshId && scene.meshes[node.meshId],
+  );
 }
 
 export function getSelectableNodes(scene: SoyelScene) {
@@ -302,7 +359,7 @@ function boxMesh(id: string, name: string, size: Vec3): MeshAsset {
   };
 }
 
-function pbrMaterial(
+export function pbrMaterial(
   id: string,
   name: string,
   baseColor: Vec4,
@@ -321,7 +378,7 @@ function pbrMaterial(
   };
 }
 
-function sceneNode(
+export function sceneNode(
   id: string,
   name: string,
   meshId: string,
@@ -340,7 +397,7 @@ function sceneNode(
   };
 }
 
-function cloneCamera(camera: CameraState): CameraState {
+export function cloneCamera(camera: CameraState): CameraState {
   return {
     position: [...camera.position],
     target: [...camera.target],
@@ -349,11 +406,11 @@ function cloneCamera(camera: CameraState): CameraState {
   };
 }
 
-function identityQuat(): Quat {
+export function identityQuat(): Quat {
   return [0, 0, 0, 1];
 }
 
-function quatFromEuler(x: number, y: number, z: number): Quat {
+export function quatFromEuler(x: number, y: number, z: number): Quat {
   const sx = Math.sin(x * 0.5);
   const cx = Math.cos(x * 0.5);
   const sy = Math.sin(y * 0.5);

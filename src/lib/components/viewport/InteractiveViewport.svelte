@@ -296,12 +296,43 @@
   }
 
   function createProxyGeometry(meshAsset: MeshAsset) {
-    const primitive = meshAsset.source.primitive;
-    switch (primitive.type) {
-      case "plane":
-        return new THREE.PlaneGeometry(primitive.size[0], primitive.size[1]);
-      case "box":
-        return new THREE.BoxGeometry(primitive.size[0], primitive.size[1], primitive.size[2]);
+    switch (meshAsset.source.type) {
+      case "procedural": {
+        const primitive = meshAsset.source.primitive;
+        switch (primitive.type) {
+          case "plane":
+            return new THREE.PlaneGeometry(primitive.size[0], primitive.size[1]);
+          case "box":
+            return new THREE.BoxGeometry(primitive.size[0], primitive.size[1], primitive.size[2]);
+        }
+      }
+      case "triangleMesh": {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(new Float32Array(meshAsset.source.geometry.positions), 3),
+        );
+
+        if (meshAsset.source.geometry.normals?.length) {
+          geometry.setAttribute(
+            "normal",
+            new THREE.BufferAttribute(new Float32Array(meshAsset.source.geometry.normals), 3),
+          );
+        } else {
+          geometry.computeVertexNormals();
+        }
+
+        if (meshAsset.source.geometry.uvs?.length) {
+          geometry.setAttribute(
+            "uv",
+            new THREE.BufferAttribute(new Float32Array(meshAsset.source.geometry.uvs), 2),
+          );
+        }
+
+        geometry.setIndex(meshAsset.source.geometry.indices);
+        geometry.computeBoundingSphere();
+        return geometry;
+      }
     }
   }
 

@@ -30,8 +30,10 @@
   import SparklesIcon from "lucide-svelte/icons/sparkles";
   import TerminalIcon from "lucide-svelte/icons/terminal";
   import TimerIcon from "lucide-svelte/icons/timer";
+  import UploadIcon from "lucide-svelte/icons/upload";
 
   import SampleCountMenu from "$lib/components/SampleCountMenu.svelte";
+  import SceneNodeTree from "$lib/components/scene/SceneNodeTree.svelte";
   import InteractiveViewport from "$lib/components/viewport/InteractiveViewport.svelte";
   import { Button } from "$lib/components/ui/button";
   import * as Resizable from "$lib/components/ui/resizable";
@@ -52,6 +54,7 @@
     type RenderPreviewFrame,
     type RendererStatus,
   } from "$lib/materials";
+  import { importGltfScene } from "$lib/gltf-importer";
   import {
     createDefaultViewportScene,
     defaultCameraState,
@@ -60,6 +63,7 @@
     materialPreviewBaseColor,
     withActiveCamera,
     withNodeMaterial,
+    withNodeVisibility,
     withSceneRevision,
     type CameraState,
     type MaterialAsset,
@@ -82,6 +86,7 @@
   let previewFrame = $state<RenderPreviewFrame | null>(null);
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
   let previewHost = $state<HTMLDivElement | null>(null);
+  let sceneFileInput = $state<HTMLInputElement | null>(null);
   let previewSize = $state({ width: 360, height: 260 });
   let query = $state("");
   let category = $state("all");
@@ -89,6 +94,7 @@
   let resolution = $state("2k");
   let isLoading = $state(false);
   let isApplying = $state(false);
+  let isSceneImporting = $state(false);
   let isRendering = $state(false);
   let isViewportInteracting = $state(false);
   let pathTraceStale = $state(true);
@@ -149,6 +155,9 @@
   );
   let rayTraceNotice = $derived(previewError || "No ray-traced frame");
   let lastRequestedViewportDisplayMode = $state<ViewportDisplayMode>("hybrid");
+  let selectedSceneNodeLabel = $derived(
+    viewportScene.selection ? (viewportScene.nodes[viewportScene.selection]?.name ?? "None") : "None",
+  );
 
   const activities = [
     { id: "scene", label: "Scene", icon: FolderTreeIcon },
@@ -380,6 +389,64 @@
     } catch (error) {
       errorMessage = String(error);
     }
+  }
+
+  async function selectSceneNode(id: string, label: string) {
+    const node = viewportScene.nodes[id];
+    if (viewportScene.selection !== id) {
+      viewportScene = withSceneRevision(viewportScene, { selection: id });
+    }
+
+    if (!node?.selectable) {
+      return;
+    }
+
+    try {
+      status = await selectSceneSurface(id, label);
+    } catch (error) {
+      errorMessage = String(error);
+    }
+  }
+
+  async function importSceneFromInput(files: FileList | null) {
+    const file = Array.from(files ?? []).find((item) => /\.(glb|gltf)$/i.test(item.name));
+    if (!file) {
+      return;
+    }
+
+    isSceneImporting = true;
+    errorMessage = "";
+
+    try {
+      const importedScene = await importGltfScene(file);
+      viewportScene = importedScene;
+      previewFrame = null;
+      pathTraceStale = true;
+
+      if (importedScene.selection) {
+        const selected = importedScene.nodes[importedScene.selection];
+        if (selected) {
+          status = await selectSceneSurface(selected.id, selected.name);
+        }
+      }
+
+      schedulePreviewFrame(0);
+    } catch (error) {
+      errorMessage = String(error);
+    } finally {
+      isSceneImporting = false;
+    }
+  }
+
+  function handleSceneDrop(event: DragEvent) {
+    event.preventDefault();
+    void importSceneFromInput(event.dataTransfer?.files ?? null);
+  }
+
+  function toggleNodeVisibility(id: string, visible: boolean) {
+    viewportScene = withNodeVisibility(viewportScene, id, visible);
+    pathTraceStale = true;
+    schedulePreviewFrame(80);
   }
 
   async function applySelectedMaterial() {
@@ -810,102 +877,154 @@
               </Button>
             </div>
 
-            <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3">
-              <div class="grid gap-2">
-                <div class="flex items-center gap-2 lg:hidden">
-                  <div class="flex min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-2">
-                    <SearchIcon class="size-4 text-muted-foreground" />
-                    <input
-                      bind:value={query}
-                      class="h-8 min-w-0 flex-1 bg-transparent text-sm outline-none"
-                      placeholder="Search materials"
-                      onkeydown={(event) => event.key === "Enter" && loadMaterials()}
-                    />
+            <div class="flex min-h-0 flex-1 flex-col overflow-auto p-3">
+              {#if layout.activeActivity === "scene"}
+                <div class="flex min-h-0 flex-1 flex-col gap-3">
+                  <input
+                    bind:this={sceneFileInput}
+                    type="file"
+                    accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+                    class="hidden"
+                    onchange={(event) => {
+                      const input = event.currentTarget;
+                      void importSceneFromInput(input.files);
+                      input.value = "";
+                    }}
+                  />
+                  <div
+                    class="grid gap-3 rounded-md border border-dashed bg-background p-3"
+                    role="region"
+                    aria-label="GLB and glTF import"
+                    ondragover={(event) => event.preventDefault()}
+                    ondrop={handleSceneDrop}
+                  >
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="truncate text-sm font-medium">GLB / glTF Scene</div>
+                        <div class="mt-1 truncate text-xs text-muted-foreground">
+                          {Object.values(viewportScene.nodes).length} nodes · {Object.values(viewportScene.meshes).length} meshes
+                        </div>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={isSceneImporting}
+                        onclick={() => sceneFileInput?.click()}
+                      >
+                        <UploadIcon data-icon="inline-start" />
+                        {isSceneImporting ? "Importing" : "Import"}
+                      </Button>
+                    </div>
                   </div>
-                  <Button variant="secondary" size="icon-sm" onclick={loadMaterials} title="Search" aria-label="Search">
-                    <SearchIcon data-icon="inline-start" />
-                  </Button>
+                  <SceneNodeTree
+                    scene={viewportScene}
+                    onSelectNode={selectSceneNode}
+                    onToggleVisibility={toggleNodeVisibility}
+                  />
                 </div>
+              {:else if layout.activeActivity === "materials"}
+                <div class="flex min-h-0 flex-1 flex-col gap-3">
+                  <div class="grid gap-2">
+                    <div class="flex items-center gap-2 lg:hidden">
+                      <div class="flex min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-2">
+                        <SearchIcon class="size-4 text-muted-foreground" />
+                        <input
+                          bind:value={query}
+                          class="h-8 min-w-0 flex-1 bg-transparent text-sm outline-none"
+                          placeholder="Search materials"
+                          onkeydown={(event) => event.key === "Enter" && loadMaterials()}
+                        />
+                      </div>
+                      <Button variant="secondary" size="icon-sm" onclick={loadMaterials} title="Search" aria-label="Search">
+                        <SearchIcon data-icon="inline-start" />
+                      </Button>
+                    </div>
 
-                <div class="grid grid-cols-3 gap-2">
-                  <select
-                    bind:value={category}
-                    class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
-                    onchange={loadMaterials}
-                  >
-                    {#each materialCategories as item}
-                      <option value={item.id}>
-                        {item.name}{item.count ? ` (${item.count})` : ""}
-                      </option>
-                    {/each}
-                  </select>
-                  <select
-                    bind:value={sort}
-                    class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
-                    onchange={loadMaterials}
-                  >
-                    <option value="popular">Popular</option>
-                    <option value="latest">Latest</option>
-                    <option value="name">Name</option>
-                  </select>
-                  <select
-                    bind:value={resolution}
-                    class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
-                    onchange={() => selectedMaterial && loadFiles(selectedMaterial.id)}
-                  >
-                    <option value="1k">1k</option>
-                    <option value="2k">2k</option>
-                    <option value="4k">4k</option>
-                    <option value="8k">8k</option>
-                  </select>
-                </div>
-              </div>
+                    <div class="grid grid-cols-3 gap-2">
+                      <select
+                        bind:value={category}
+                        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
+                        onchange={loadMaterials}
+                      >
+                        {#each materialCategories as item}
+                          <option value={item.id}>
+                            {item.name}{item.count ? ` (${item.count})` : ""}
+                          </option>
+                        {/each}
+                      </select>
+                      <select
+                        bind:value={sort}
+                        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
+                        onchange={loadMaterials}
+                      >
+                        <option value="popular">Popular</option>
+                        <option value="latest">Latest</option>
+                        <option value="name">Name</option>
+                      </select>
+                      <select
+                        bind:value={resolution}
+                        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
+                        onchange={() => selectedMaterial && loadFiles(selectedMaterial.id)}
+                      >
+                        <option value="1k">1k</option>
+                        <option value="2k">2k</option>
+                        <option value="4k">4k</option>
+                        <option value="8k">8k</option>
+                      </select>
+                    </div>
+                  </div>
 
-              {#if isLoading}
-                <div class="grid gap-2">
-                  {#each Array(8) as _}
-                    <div class="h-20 animate-pulse rounded-md border bg-muted"></div>
-                  {/each}
-                </div>
-              {:else if materials.length === 0}
-                <div class="rounded-md border bg-background p-4 text-sm text-muted-foreground">
-                  No matching materials.
+                  {#if isLoading}
+                    <div class="grid gap-2">
+                      {#each Array(8) as _}
+                        <div class="h-20 animate-pulse rounded-md border bg-muted"></div>
+                      {/each}
+                    </div>
+                  {:else if materials.length === 0}
+                    <div class="rounded-md border bg-background p-4 text-sm text-muted-foreground">
+                      No matching materials.
+                    </div>
+                  {:else}
+                    <div class="grid gap-2">
+                      {#each materials as material}
+                        <button
+                          class="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3 rounded-md border bg-background p-2 text-left transition hover:border-primary/60 hover:bg-muted"
+                          class:border-primary={selectedMaterial?.id === material.id}
+                          aria-pressed={selectedMaterial?.id === material.id}
+                          onclick={() => selectMaterial(material)}
+                        >
+                          <div class="aspect-square overflow-hidden rounded-sm border bg-muted">
+                            {#if material.thumbnailUrl}
+                              <img src={material.thumbnailUrl} alt="" class="size-full object-cover" loading="lazy" />
+                            {/if}
+                          </div>
+                          <div class="min-w-0">
+                            <div class="flex items-center gap-2">
+                              <span class="truncate text-sm font-medium">{material.name}</span>
+                              {#if status?.appliedMaterials.some((item) => item.materialId === material.id)}
+                                <CheckIcon class="size-3.5 shrink-0 text-primary" />
+                              {/if}
+                            </div>
+                            <div class="mt-1 flex flex-wrap gap-1">
+                              {#each material.categories.slice(0, 3) as item}
+                                <span class="rounded-sm bg-secondary px-1.5 py-0.5 text-[0.65rem] text-secondary-foreground">
+                                  {item}
+                                </span>
+                              {/each}
+                            </div>
+                            <div class="mt-2 flex items-center justify-between text-[0.68rem] text-muted-foreground">
+                              <span>{formatResolution(material)}</span>
+                              <span>{formatDimensions(material)}</span>
+                            </div>
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
               {:else}
-                <div class="grid gap-2">
-                  {#each materials as material}
-                    <button
-                      class="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-3 rounded-md border bg-background p-2 text-left transition hover:border-primary/60 hover:bg-muted"
-                      class:border-primary={selectedMaterial?.id === material.id}
-                      aria-pressed={selectedMaterial?.id === material.id}
-                      onclick={() => selectMaterial(material)}
-                    >
-                      <div class="aspect-square overflow-hidden rounded-sm border bg-muted">
-                        {#if material.thumbnailUrl}
-                          <img src={material.thumbnailUrl} alt="" class="size-full object-cover" loading="lazy" />
-                        {/if}
-                      </div>
-                      <div class="min-w-0">
-                        <div class="flex items-center gap-2">
-                          <span class="truncate text-sm font-medium">{material.name}</span>
-                          {#if status?.appliedMaterials.some((item) => item.materialId === material.id)}
-                            <CheckIcon class="size-3.5 shrink-0 text-primary" />
-                          {/if}
-                        </div>
-                        <div class="mt-1 flex flex-wrap gap-1">
-                          {#each material.categories.slice(0, 3) as item}
-                            <span class="rounded-sm bg-secondary px-1.5 py-0.5 text-[0.65rem] text-secondary-foreground">
-                              {item}
-                            </span>
-                          {/each}
-                        </div>
-                        <div class="mt-2 flex items-center justify-between text-[0.68rem] text-muted-foreground">
-                          <span>{formatResolution(material)}</span>
-                          <span>{formatDimensions(material)}</span>
-                        </div>
-                      </div>
-                    </button>
-                  {/each}
+                <div class="rounded-md border bg-background p-4 text-sm text-muted-foreground">
+                  {layout.activeActivity === "assets" ? "No imported assets selected." : "Render controls are in the viewport toolbar."}
                 </div>
               {/if}
             </div>
@@ -962,7 +1081,7 @@
                   {#if showInteractiveViewport}
                     <InteractiveViewport
                       viewportScene={viewportScene}
-                      selectedSurfaceId={status?.selectedSurface.id}
+                      selectedSurfaceId={viewportScene.selection ?? status?.selectedSurface.id}
                       appliedMaterials={status?.appliedMaterials ?? []}
                       isRendering={isRendering}
                       isPathTraceStale={pathTraceStale || isViewportInteracting}
@@ -1077,7 +1196,7 @@
                     {@const applied = appliedForSurface(surface.id)}
                     <button
                       class="flex min-h-11 items-center gap-2 rounded-md border bg-background px-3 py-2 text-left text-sm hover:bg-muted"
-                      class:border-primary={status?.selectedSurface.id === surface.id}
+                      class:border-primary={viewportScene.selection === surface.id}
                       onclick={() => selectSurface(surface.id, surface.label)}
                     >
                       <SurfaceIcon class="size-4 text-muted-foreground" />
@@ -1190,7 +1309,7 @@
 
   <footer class="flex h-6 shrink-0 items-center justify-between border-t bg-primary px-3 text-[0.72rem] font-medium text-primary-foreground">
     <div class="flex min-w-0 items-center gap-4">
-      <span class="truncate">Surface: {status?.selectedSurface.label ?? "Chair Shell"}</span>
+      <span class="truncate">Surface: {selectedSceneNodeLabel}</span>
       <span class="truncate">Materials: {materials.length}</span>
     </div>
     <div class="flex shrink-0 items-center gap-1">

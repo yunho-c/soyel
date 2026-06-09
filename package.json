@@ -14,6 +14,7 @@
     "tauri:build": "bun tauri build"
   },
   "dependencies": {
+    "@pierre/trees": "^1.0.0-beta.4",
     "@tauri-apps/api": "^2.0.0",
     "bits-ui": "^2.18.1",
     "clsx": "^2.1.1",

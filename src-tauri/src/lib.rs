@@ -417,6 +417,8 @@ struct SceneSnapshot {
 struct SceneNodeSnapshot {
     id: String,
     name: String,
+    #[serde(default)]
+    parent_id: Option<String>,
     mesh_id: Option<String>,
     material_bindings: HashMap<String, String>,
     transform: SceneTransformSnapshot,
@@ -438,9 +440,25 @@ struct MeshAssetSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum MeshSourceSnapshot {
+    Procedural {
+        primitive: ProceduralMeshPrimitiveSnapshot,
+    },
+    TriangleMesh {
+        geometry: TriangleMeshSnapshot,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MeshSourceSnapshot {
-    primitive: ProceduralMeshPrimitiveSnapshot,
+struct TriangleMeshSnapshot {
+    positions: Vec<f32>,
+    #[allow(dead_code)]
+    normals: Option<Vec<f32>>,
+    #[allow(dead_code)]
+    uvs: Option<Vec<f32>>,
+    indices: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1153,7 +1171,7 @@ fn scene_cpu_from_snapshot(
 
     for node_id in node_ids {
         let node = &snapshot.nodes[&node_id];
-        if !node.visible {
+        if !is_snapshot_node_effectively_visible(snapshot, node) {
             continue;
         }
 
@@ -1175,12 +1193,19 @@ fn scene_cpu_from_snapshot(
             material_override,
         )?;
 
-        match &mesh.source.primitive {
-            ProceduralMeshPrimitiveSnapshot::Plane { size } => {
+        match &mesh.source {
+            MeshSourceSnapshot::Procedural {
+                primitive: ProceduralMeshPrimitiveSnapshot::Plane { size },
+            } => {
                 push_snapshot_plane(&mut scene, *size, &node.transform, material_index);
             }
-            ProceduralMeshPrimitiveSnapshot::Box { size } => {
+            MeshSourceSnapshot::Procedural {
+                primitive: ProceduralMeshPrimitiveSnapshot::Box { size },
+            } => {
                 push_snapshot_box(&mut scene, *size, &node.transform, material_index);
+            }
+            MeshSourceSnapshot::TriangleMesh { geometry } => {
+                push_snapshot_triangle_mesh(&mut scene, geometry, &node.transform, material_index)?;
             }
         }
     }
@@ -1193,6 +1218,32 @@ fn scene_cpu_from_snapshot(
     }
 
     Ok(scene)
+}
+
+fn is_snapshot_node_effectively_visible(
+    snapshot: &SceneSnapshot,
+    node: &SceneNodeSnapshot,
+) -> bool {
+    let mut current = Some(node);
+    let mut visited = BTreeSet::new();
+
+    while let Some(node) = current {
+        if !node.visible {
+            return false;
+        }
+
+        let Some(parent_id) = node.parent_id.as_deref() else {
+            return true;
+        };
+
+        if !visited.insert(node.id.as_str()) {
+            return false;
+        }
+
+        current = snapshot.nodes.get(parent_id);
+    }
+
+    true
 }
 
 fn material_index_for_node(
@@ -1329,6 +1380,53 @@ fn push_snapshot_box(
         ],
         mat_idx,
     );
+}
+
+fn push_snapshot_triangle_mesh(
+    scene: &mut lupin_pt::SceneCPU,
+    geometry: &TriangleMeshSnapshot,
+    transform: &SceneTransformSnapshot,
+    mat_idx: u32,
+) -> Result<(), String> {
+    if geometry.positions.len() % 3 != 0 {
+        return Err(format!(
+            "triangle mesh positions length {} is not divisible by 3",
+            geometry.positions.len()
+        ));
+    }
+
+    let vertex_count = geometry.positions.len() / 3;
+    if geometry.indices.len() < 3 || geometry.indices.len() % 3 != 0 {
+        return Err(format!(
+            "triangle mesh index length {} does not describe whole triangles",
+            geometry.indices.len()
+        ));
+    }
+
+    for index in &geometry.indices {
+        if *index as usize >= vertex_count {
+            return Err(format!(
+                "triangle mesh index {index} references only {vertex_count} vertices"
+            ));
+        }
+    }
+
+    let verts = geometry
+        .positions
+        .chunks_exact(3)
+        .map(|point| transform_point(transform, [point[0], point[1], point[2]]))
+        .collect::<Vec<_>>();
+    let mesh_idx = scene.mesh_infos.len() as u32;
+    scene.mesh_infos.push(lupin_pt::MeshInfo::default());
+    scene.verts_pos_array.push(verts);
+    scene.indices_array.push(geometry.indices.clone());
+    scene.instances.push(lupin_pt::Instance {
+        mesh_idx,
+        mat_idx,
+        ..Default::default()
+    });
+
+    Ok(())
 }
 
 fn transform_point(transform: &SceneTransformSnapshot, point: [f32; 3]) -> lupin_pt::Vec4 {
@@ -1696,7 +1794,7 @@ fn default_cornell_scene_snapshot() -> SceneSnapshot {
 
 fn plane_snapshot(size: [f32; 2]) -> MeshAssetSnapshot {
     MeshAssetSnapshot {
-        source: MeshSourceSnapshot {
+        source: MeshSourceSnapshot::Procedural {
             primitive: ProceduralMeshPrimitiveSnapshot::Plane { size },
         },
     }
@@ -1704,7 +1802,7 @@ fn plane_snapshot(size: [f32; 2]) -> MeshAssetSnapshot {
 
 fn box_snapshot(size: [f32; 3]) -> MeshAssetSnapshot {
     MeshAssetSnapshot {
-        source: MeshSourceSnapshot {
+        source: MeshSourceSnapshot::Procedural {
             primitive: ProceduralMeshPrimitiveSnapshot::Box { size },
         },
     }
@@ -1735,6 +1833,7 @@ fn node_snapshot(
     SceneNodeSnapshot {
         id: id.to_string(),
         name: name.to_string(),
+        parent_id: None,
         mesh_id: Some(mesh_id.to_string()),
         material_bindings: HashMap::from([("default".to_string(), material_id.to_string())]),
         transform: SceneTransformSnapshot {
@@ -1990,6 +2089,28 @@ mod tests {
     }
 
     #[test]
+    fn triangle_mesh_snapshot_converts_to_lupin_mesh() {
+        let snapshot = triangle_mesh_scene_snapshot(true);
+        let scene = scene_cpu_from_snapshot(&snapshot, None, None).unwrap();
+
+        assert_eq!(scene.instances.len(), 1);
+        assert_eq!(scene.mesh_infos.len(), 1);
+        assert_eq!(scene.verts_pos_array[0].len(), 3);
+        assert_eq!(scene.indices_array[0], vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn hidden_parent_hides_triangle_mesh_child() {
+        let snapshot = triangle_mesh_scene_snapshot(false);
+        let error = scene_cpu_from_snapshot(&snapshot, None, None).unwrap_err();
+
+        assert!(
+            error.contains("contains no visible renderable nodes"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
     fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
         let width = 128;
@@ -2024,6 +2145,62 @@ mod tests {
             target: [0.0, 0.68, 0.05],
             up: [0.0, 1.0, 0.0],
             fov_degrees: 42.0,
+        }
+    }
+
+    fn triangle_mesh_scene_snapshot(root_visible: bool) -> SceneSnapshot {
+        let root = SceneNodeSnapshot {
+            id: "root".to_string(),
+            name: "Root".to_string(),
+            parent_id: None,
+            mesh_id: None,
+            material_bindings: HashMap::new(),
+            transform: SceneTransformSnapshot {
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            visible: root_visible,
+        };
+        let child = SceneNodeSnapshot {
+            id: "triangle".to_string(),
+            name: "Triangle".to_string(),
+            parent_id: Some("root".to_string()),
+            mesh_id: Some("triangleMesh".to_string()),
+            material_bindings: HashMap::from([("default".to_string(), "mat".to_string())]),
+            transform: SceneTransformSnapshot {
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            visible: true,
+        };
+
+        SceneSnapshot {
+            revision: 7,
+            cameras: HashMap::from([(
+                "camera-main".to_string(),
+                default_frontend_preview_camera(),
+            )]),
+            active_camera_id: "camera-main".to_string(),
+            nodes: HashMap::from([("root".to_string(), root), ("triangle".to_string(), child)]),
+            meshes: HashMap::from([(
+                "triangleMesh".to_string(),
+                MeshAssetSnapshot {
+                    source: MeshSourceSnapshot::TriangleMesh {
+                        geometry: TriangleMeshSnapshot {
+                            positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            normals: None,
+                            uvs: None,
+                            indices: vec![0, 1, 2],
+                        },
+                    },
+                },
+            )]),
+            materials: HashMap::from([(
+                "mat".to_string(),
+                material_snapshot([0.8, 0.7, 0.6, 1.0], 0.5, 0.0, [0.0, 0.0, 0.0]),
+            )]),
         }
     }
 
