@@ -238,7 +238,7 @@ impl PreviewRenderWorker {
                 &context.pathtrace_resources,
                 &scene,
                 targets.output.front(),
-                preview_pathtrace_type(),
+                Default::default(),
                 &lupin_pt::PathtraceDesc {
                     accum_params: Some(lupin_pt::AccumulationParams {
                         prev_frame: targets.output.back(),
@@ -994,7 +994,7 @@ fn render_lupin_preview(
             &pathtrace_resources,
             &scene,
             output.front(),
-            preview_pathtrace_type(),
+            Default::default(),
             &lupin_pt::PathtraceDesc {
                 accum_params: Some(lupin_pt::AccumulationParams {
                     prev_frame: output.back(),
@@ -1100,10 +1100,6 @@ fn ensure_lupin_preview_supported() -> Result<(), String> {
         "WGPU adapter {:?} supports neither Lupin's legacy buffer-binding-array path nor its packed software-BVH path",
         adapter.get_info().name
     ))
-}
-
-fn preview_pathtrace_type() -> lupin_pt::PathtraceType {
-    lupin_pt::PathtraceType::Direct
 }
 
 fn default_wgpu_instance_descriptor() -> lupin_pt::wgpu::InstanceDescriptor {
@@ -2072,11 +2068,6 @@ mod tests {
             STREAM_FRAME_FINAL
         );
         assert_eq!(&packet[STREAM_FRAME_HEADER_BYTES..], pixels.as_slice());
-    }
-
-    #[test]
-    fn lupin_preview_uses_direct_light_sampling() {
-        assert_eq!(preview_pathtrace_type(), lupin_pt::PathtraceType::Direct);
     }
 
     #[test]

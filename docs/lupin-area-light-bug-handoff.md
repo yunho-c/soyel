@@ -12,25 +12,17 @@ Soyel depends on the local Lupin fork:
 lupin_pt = { path = "../../LupinPathTracer-fork/lupin", package = "lupin_pt" }
 ```
 
-Original Soyel render path:
+Relevant Soyel render path:
 
 ```text
 src-tauri/src/lib.rs:935
 ```
 
-Soyel called `lupin_pt::pathtrace_scene(..., Default::default(), ...)`, where `Default::default()` is `PathtraceType::Standard`. The preview render also sets:
+Soyel calls `lupin_pt::pathtrace_scene(..., Default::default(), ...)`, where `Default::default()` is `PathtraceType::Standard`. The preview render also sets:
 
 ```rust
 force_software_bvh: true
 ```
-
-## Resolution
-
-Soyel now routes both sync and streaming Lupin previews through `preview_pathtrace_type()`, which returns `lupin_pt::PathtraceType::Direct`.
-
-Rationale: CPU-side conversion already proves emissive material preservation and Lupin light registration. Directly visible emissive geometry also renders. The missing behavior is receiver illumination from sampled lights, so Soyel should use Lupin's direct-light integrator instead of the default standard integrator for viewport previews.
-
-The local sandbox used for this fix cannot acquire a WGPU adapter, so ignored GPU render tests still fail before rendering here. The non-GPU regression locks the selected integrator, and default Rust tests pass.
 
 ## Observed Problem
 
