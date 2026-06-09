@@ -2111,6 +2111,57 @@ mod tests {
     }
 
     #[test]
+    fn emissive_plane_snapshot_registers_lupin_light() {
+        let snapshot = light_only_scene_snapshot();
+        let scene = scene_cpu_from_snapshot(&snapshot, None, None).unwrap();
+        let lights = lupin_pt::build_lights(&scene, &[]);
+
+        assert_eq!(scene.instances.len(), 1);
+        assert_eq!(scene.materials.len(), 1);
+        assert!(
+            scene.materials[0].emission.x > 10.0 && scene.materials[0].emission.y > 8.0,
+            "emissive material was not preserved: {:?}",
+            scene.materials[0]
+        );
+        assert_eq!(
+            lights.lights.len(),
+            1,
+            "emissive plane should be registered as one Lupin area light"
+        );
+    }
+
+    #[test]
+    fn emissive_plane_receiver_snapshot_registers_lupin_light() {
+        let snapshot = lit_triangle_mesh_scene_snapshot();
+        let scene = scene_cpu_from_snapshot(&snapshot, None, None).unwrap();
+        let lights = lupin_pt::build_lights(&scene, &[]);
+
+        assert_eq!(scene.instances.len(), 2);
+        assert_eq!(scene.materials.len(), 2);
+        assert!(
+            scene
+                .materials
+                .iter()
+                .any(|material| material.emission.x == 0.0 && material.emission.y == 0.0),
+            "receiver material should remain non-emissive: {:?}",
+            scene.materials
+        );
+        assert!(
+            scene
+                .materials
+                .iter()
+                .any(|material| material.emission.x > 10.0 && material.emission.y > 8.0),
+            "emissive light material was not preserved: {:?}",
+            scene.materials
+        );
+        assert_eq!(
+            lights.lights.len(),
+            1,
+            "receiver scene should register exactly one Lupin area light"
+        );
+    }
+
+    #[test]
     #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
     fn soyel_preview_scene_renders_nonzero_pixels() -> Result<(), String> {
         let width = 128;
@@ -2139,12 +2190,352 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
+    fn emissive_plane_only_scene_renders_nonzero_pixels() -> Result<(), String> {
+        let width = 96;
+        let height = 96;
+        let camera = PreviewCamera {
+            position: [0.0, 0.0, 3.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_degrees: 42.0,
+        };
+        let scene = light_only_scene_snapshot();
+        let pixels =
+            render_lupin_preview(width, height, 4, Some(&scene), None, None, Some(&camera))?;
+
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+
+        let stats = rgba8_stats(&pixels);
+        assert!(
+            stats.non_black_pixels > 64,
+            "emissive light-only scene produced too few visible pixels: {stats:?}"
+        );
+        assert!(
+            stats.max_luma > 8,
+            "emissive light-only scene produced only black or near-black pixels: {stats:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
+    fn emissive_triangle_mesh_only_scene_renders_nonzero_pixels() -> Result<(), String> {
+        let width = 96;
+        let height = 96;
+        let camera = PreviewCamera {
+            position: [0.0, 0.0, 3.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_degrees: 42.0,
+        };
+        let scene = emissive_triangle_mesh_scene_snapshot();
+        let pixels =
+            render_lupin_preview(width, height, 4, Some(&scene), None, None, Some(&camera))?;
+
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+
+        let stats = rgba8_stats(&pixels);
+        assert!(
+            stats.non_black_pixels > 64,
+            "emissive triangle-mesh scene produced too few visible pixels: {stats:?}"
+        );
+        assert!(
+            stats.max_luma > 8,
+            "emissive triangle-mesh scene produced only black or near-black pixels: {stats:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
+    fn emissive_plane_lights_triangle_mesh_receiver() -> Result<(), String> {
+        let width = 128;
+        let height = 96;
+        let camera = PreviewCamera {
+            position: [0.0, 0.0, 3.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_degrees: 42.0,
+        };
+        let scene = lit_triangle_mesh_scene_snapshot();
+        let pixels =
+            render_lupin_preview(width, height, 16, Some(&scene), None, None, Some(&camera))?;
+
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+
+        let stats = rgba8_stats(&pixels);
+        assert!(
+            stats.non_black_pixels > 64,
+            "triangle mesh receiver scene produced too few visible pixels: {stats:?}"
+        );
+        assert!(
+            stats.max_luma > 8,
+            "triangle mesh receiver scene produced only black or near-black pixels: {stats:?}"
+        );
+        assert!(
+            stats.unique_rgb_count > 2,
+            "triangle mesh receiver scene did not produce varied RGB output: {stats:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a supported WGPU adapter and Lupin packed/software-BVH path"]
+    fn emissive_plane_lights_procedural_receiver() -> Result<(), String> {
+        let width = 128;
+        let height = 96;
+        let camera = PreviewCamera {
+            position: [0.0, 0.0, 3.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov_degrees: 42.0,
+        };
+        let scene = lit_procedural_receiver_scene_snapshot();
+        let pixels =
+            render_lupin_preview(width, height, 16, Some(&scene), None, None, Some(&camera))?;
+
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+
+        let stats = rgba8_stats(&pixels);
+        assert!(
+            stats.non_black_pixels > 64,
+            "procedural receiver scene produced too few visible pixels: {stats:?}"
+        );
+        assert!(
+            stats.max_luma > 8,
+            "procedural receiver scene produced only black or near-black pixels: {stats:?}"
+        );
+
+        Ok(())
+    }
+
     fn default_frontend_preview_camera() -> PreviewCamera {
         PreviewCamera {
             position: [0.0, 0.95, -3.1],
             target: [0.0, 0.68, 0.05],
             up: [0.0, 1.0, 0.0],
             fov_degrees: 42.0,
+        }
+    }
+
+    fn light_only_scene_snapshot() -> SceneSnapshot {
+        SceneSnapshot {
+            revision: 11,
+            cameras: HashMap::from([(
+                "camera-main".to_string(),
+                PreviewCamera {
+                    position: [0.0, 0.0, 3.0],
+                    target: [0.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    fov_degrees: 42.0,
+                },
+            )]),
+            active_camera_id: "camera-main".to_string(),
+            nodes: HashMap::from([(
+                "default-area-light".to_string(),
+                node_snapshot(
+                    "default-area-light",
+                    "Default Area Light",
+                    "light",
+                    "lightMat",
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ),
+            )]),
+            meshes: HashMap::from([("light".to_string(), plane_snapshot([1.5, 1.5]))]),
+            materials: HashMap::from([(
+                "lightMat".to_string(),
+                material_snapshot([1.0, 0.9, 0.68, 1.0], 0.28, 0.0, [12.0, 10.0, 7.0]),
+            )]),
+        }
+    }
+
+    fn emissive_triangle_mesh_scene_snapshot() -> SceneSnapshot {
+        SceneSnapshot {
+            revision: 13,
+            cameras: HashMap::from([(
+                "camera-main".to_string(),
+                PreviewCamera {
+                    position: [0.0, 0.0, 3.0],
+                    target: [0.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    fov_degrees: 42.0,
+                },
+            )]),
+            active_camera_id: "camera-main".to_string(),
+            nodes: HashMap::from([(
+                "emissive-triangle-mesh".to_string(),
+                SceneNodeSnapshot {
+                    id: "emissive-triangle-mesh".to_string(),
+                    name: "Emissive Triangle Mesh".to_string(),
+                    parent_id: None,
+                    mesh_id: Some("emissiveMesh".to_string()),
+                    material_bindings: HashMap::from([(
+                        "default".to_string(),
+                        "lightMat".to_string(),
+                    )]),
+                    transform: SceneTransformSnapshot {
+                        translation: [0.0, 0.0, 0.0],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    visible: true,
+                },
+            )]),
+            meshes: HashMap::from([(
+                "emissiveMesh".to_string(),
+                MeshAssetSnapshot {
+                    source: MeshSourceSnapshot::TriangleMesh {
+                        geometry: TriangleMeshSnapshot {
+                            positions: vec![
+                                -0.8, -0.8, 0.0, 0.8, -0.8, 0.0, 0.8, 0.8, 0.0, -0.8, 0.8, 0.0,
+                            ],
+                            normals: None,
+                            uvs: None,
+                            indices: vec![0, 1, 2, 2, 3, 0],
+                        },
+                    },
+                },
+            )]),
+            materials: HashMap::from([(
+                "lightMat".to_string(),
+                material_snapshot([1.0, 0.9, 0.68, 1.0], 0.28, 0.0, [12.0, 10.0, 7.0]),
+            )]),
+        }
+    }
+
+    fn lit_triangle_mesh_scene_snapshot() -> SceneSnapshot {
+        SceneSnapshot {
+            revision: 12,
+            cameras: HashMap::from([(
+                "camera-main".to_string(),
+                PreviewCamera {
+                    position: [0.0, 0.0, 3.0],
+                    target: [0.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    fov_degrees: 42.0,
+                },
+            )]),
+            active_camera_id: "camera-main".to_string(),
+            nodes: HashMap::from([
+                (
+                    "receiver".to_string(),
+                    SceneNodeSnapshot {
+                        id: "receiver".to_string(),
+                        name: "Triangle Mesh Receiver".to_string(),
+                        parent_id: None,
+                        mesh_id: Some("receiverMesh".to_string()),
+                        material_bindings: HashMap::from([(
+                            "default".to_string(),
+                            "receiverMat".to_string(),
+                        )]),
+                        transform: SceneTransformSnapshot {
+                            translation: [0.0, 0.0, 0.0],
+                            rotation: [0.0, 0.0, 0.0, 1.0],
+                            scale: [1.0, 1.0, 1.0],
+                        },
+                        visible: true,
+                    },
+                ),
+                (
+                    "default-area-light".to_string(),
+                    node_snapshot(
+                        "default-area-light",
+                        "Default Area Light",
+                        "light",
+                        "lightMat",
+                        [0.0, 1.45, 1.2],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ),
+                ),
+            ]),
+            meshes: HashMap::from([
+                (
+                    "receiverMesh".to_string(),
+                    MeshAssetSnapshot {
+                        source: MeshSourceSnapshot::TriangleMesh {
+                            geometry: TriangleMeshSnapshot {
+                                positions: vec![
+                                    -1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+                                ],
+                                normals: None,
+                                uvs: None,
+                                indices: vec![0, 2, 1, 0, 3, 2],
+                            },
+                        },
+                    },
+                ),
+                ("light".to_string(), plane_snapshot([0.9, 0.65])),
+            ]),
+            materials: HashMap::from([
+                (
+                    "receiverMat".to_string(),
+                    material_snapshot([0.72, 0.70, 0.64, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+                ),
+                (
+                    "lightMat".to_string(),
+                    material_snapshot([1.0, 0.9, 0.68, 1.0], 0.28, 0.0, [20.0, 17.0, 12.0]),
+                ),
+            ]),
+        }
+    }
+
+    fn lit_procedural_receiver_scene_snapshot() -> SceneSnapshot {
+        SceneSnapshot {
+            revision: 14,
+            cameras: HashMap::from([(
+                "camera-main".to_string(),
+                PreviewCamera {
+                    position: [0.0, 0.0, 3.0],
+                    target: [0.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    fov_degrees: 42.0,
+                },
+            )]),
+            active_camera_id: "camera-main".to_string(),
+            nodes: HashMap::from([
+                (
+                    "receiver".to_string(),
+                    node_snapshot(
+                        "receiver",
+                        "Procedural Receiver",
+                        "receiverPlane",
+                        "receiverMat",
+                        [0.0, 0.0, 0.0],
+                        quat_from_euler(0.0, std::f32::consts::PI, 0.0),
+                    ),
+                ),
+                (
+                    "default-area-light".to_string(),
+                    node_snapshot(
+                        "default-area-light",
+                        "Default Area Light",
+                        "light",
+                        "lightMat",
+                        [0.0, 1.45, 1.2],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ),
+                ),
+            ]),
+            meshes: HashMap::from([
+                ("receiverPlane".to_string(), plane_snapshot([2.0, 2.0])),
+                ("light".to_string(), plane_snapshot([0.9, 0.65])),
+            ]),
+            materials: HashMap::from([
+                (
+                    "receiverMat".to_string(),
+                    material_snapshot([0.72, 0.70, 0.64, 1.0], 0.82, 0.0, [0.0, 0.0, 0.0]),
+                ),
+                (
+                    "lightMat".to_string(),
+                    material_snapshot([1.0, 0.9, 0.68, 1.0], 0.28, 0.0, [20.0, 17.0, 12.0]),
+                ),
+            ]),
         }
     }
 
