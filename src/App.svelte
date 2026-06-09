@@ -418,7 +418,7 @@
     errorMessage = "";
 
     try {
-      const importedScene = await importGltfScene(file);
+      const importedScene = await importGltfScene(file, files ?? [file]);
       viewportScene = importedScene;
       previewFrame = null;
       pathTraceStale = true;
@@ -883,7 +883,8 @@
                   <input
                     bind:this={sceneFileInput}
                     type="file"
-                    accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+                    multiple
+                    accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,model/gltf-binary,model/gltf+json,image/png,image/jpeg,image/webp,application/octet-stream"
                     class="hidden"
                     onchange={(event) => {
                       const input = event.currentTarget;
@@ -902,7 +903,7 @@
                       <div class="min-w-0">
                         <div class="truncate text-sm font-medium">GLB / glTF Scene</div>
                         <div class="mt-1 truncate text-xs text-muted-foreground">
-                          {Object.values(viewportScene.nodes).length} nodes · {Object.values(viewportScene.meshes).length} meshes
+                          Select .glb, or .gltf with .bin/images · {Object.values(viewportScene.nodes).length} nodes
                         </div>
                       </div>
                       <Button

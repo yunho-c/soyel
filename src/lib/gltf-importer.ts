@@ -31,11 +31,34 @@ type SceneBounds = {
   max: Vec3;
 };
 
-const loader = new GLTFLoader();
+type ImportResourceFile = File & {
+  webkitRelativePath?: string;
+};
 
-export async function importGltfScene(file: File): Promise<SoyelScene> {
-  const buffer = await file.arrayBuffer();
-  const gltf = await parseGltf(buffer, file.name);
+export async function importGltfScene(file: File, resourceFiles: Iterable<File> = [file]): Promise<SoyelScene> {
+  const resourceIndex = buildResourceIndex(resourceFiles);
+  const objectUrls: string[] = [];
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    const resource = resolveResourceFile(url, resourceIndex);
+    if (!resource) {
+      return url;
+    }
+
+    const objectUrl = URL.createObjectURL(resource);
+    objectUrls.push(objectUrl);
+    return objectUrl;
+  });
+
+  let gltf: GLTF;
+  try {
+    gltf = await parseGltf(await readGltfPayload(file, resourceIndex), file.name, manager);
+  } finally {
+    for (const url of objectUrls) {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   const imported = normalizeGltf(gltf, file.name);
 
   if (!imported.bounds) {
@@ -59,18 +82,106 @@ export async function importGltfScene(file: File): Promise<SoyelScene> {
   };
 }
 
-function parseGltf(buffer: ArrayBuffer, filename: string) {
+async function readGltfPayload(file: File, resourceIndex: Map<string, File>) {
+  if (!file.name.toLowerCase().endsWith(".gltf")) {
+    return file.arrayBuffer();
+  }
+
+  const text = await file.text();
+  const missing = missingExternalResourceUris(text, resourceIndex);
+  if (missing.length) {
+    throw new Error(
+      `The glTF file "${file.name}" references external resources that were not included: ${missing.join(
+        ", ",
+      )}. Select the .gltf file together with its .bin and image sidecars, or import the .glb variant.`,
+    );
+  }
+
+  return text;
+}
+
+function parseGltf(payload: string | ArrayBuffer, filename: string, manager: THREE.LoadingManager) {
   return new Promise<GLTF>((resolve, reject) => {
+    const loader = new GLTFLoader(manager);
     loader.parse(
-      buffer,
+      payload,
       "",
       (gltf) => resolve(gltf),
       (error) => {
-        const kind = filename.toLowerCase().endsWith(".gltf") ? "self-contained glTF" : "GLB";
+        const kind = filename.toLowerCase().endsWith(".gltf") ? "glTF" : "GLB";
         reject(new Error(`Failed to parse ${kind} file "${filename}": ${String(error)}`));
       },
     );
   });
+}
+
+function buildResourceIndex(files: Iterable<File>) {
+  const index = new Map<string, File>();
+
+  for (const file of files as Iterable<ImportResourceFile>) {
+    const relativePath = file.webkitRelativePath || file.name;
+    for (const key of resourceKeys(relativePath)) {
+      index.set(key, file);
+    }
+  }
+
+  return index;
+}
+
+function missingExternalResourceUris(text: string, resourceIndex: Map<string, File>) {
+  const missing = new Set<string>();
+  const document = JSON.parse(text) as {
+    buffers?: Array<{ uri?: string }>;
+    images?: Array<{ uri?: string }>;
+  };
+
+  for (const resource of [...(document.buffers ?? []), ...(document.images ?? [])]) {
+    const uri = resource.uri;
+    if (!uri || isEmbeddedOrRemoteUri(uri)) {
+      continue;
+    }
+
+    if (!resolveResourceFile(uri, resourceIndex)) {
+      missing.add(uri);
+    }
+  }
+
+  return [...missing].sort();
+}
+
+function resolveResourceFile(uri: string, resourceIndex: Map<string, File>) {
+  if (isEmbeddedOrRemoteUri(uri)) {
+    return null;
+  }
+
+  for (const key of resourceKeys(uri)) {
+    const file = resourceIndex.get(key);
+    if (file) {
+      return file;
+    }
+  }
+
+  return null;
+}
+
+function resourceKeys(path: string) {
+  const normalized = normalizeResourcePath(path);
+  const parts = normalized.split("/").filter(Boolean);
+  const basename = parts.at(-1) ?? normalized;
+
+  return new Set([normalized, basename, decodeURIComponent(normalized), decodeURIComponent(basename)]);
+}
+
+function normalizeResourcePath(path: string) {
+  return path
+    .split(/[?#]/u)[0]
+    .replace(/\\/gu, "/")
+    .replace(/^\.\/+/u, "")
+    .replace(/^\/+/u, "");
+}
+
+function isEmbeddedOrRemoteUri(uri: string) {
+  return /^(data|blob|https?):/iu.test(uri);
 }
 
 function normalizeGltf(gltf: GLTF, filename: string): ImportedSceneParts {
