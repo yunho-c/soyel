@@ -69,9 +69,9 @@ emissive_triangle_mesh_only_scene_renders_nonzero_pixels
 
 When the camera directly sees emissive geometry, Lupin renders non-black pixels.
 
-## What Fails
+## Original Receiver-Lighting Failure
 
-GPU-side receiver illumination fails:
+With Soyel's original `PathtraceType::Standard` preview path, GPU-side receiver illumination failed:
 
 ```text
 src-tauri/src/lib.rs:2255
@@ -95,7 +95,7 @@ Actual: fully black output:
 Rgba8Stats { non_black_pixels: 0, max_luma: 0, unique_rgb_count: 1 }
 ```
 
-Run from Soyel:
+Historical reproduction from Soyel:
 
 ```sh
 cd src-tauri
@@ -103,11 +103,11 @@ env RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER= cargo test
 env RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WRAPPER= cargo test emissive_ -- --ignored --nocapture
 ```
 
-Default tests pass. The ignored GPU command passes the directly visible emissive tests and fails the receiver-lighting tests.
+Default tests passed. Before the direct-light preview fix, the ignored GPU command passed the directly visible emissive tests and failed the receiver-lighting tests. After the fix, those ignored receiver-lighting tests exercise `PathtraceType::Direct`; they still require a supported WGPU adapter to run.
 
-## Likely Failure Boundary
+## Lupin Failure Boundary
 
-The bug is probably not in:
+The original `PathtraceType::Standard` failure was probably not in:
 
 - glTF importer fallback light brightness
 - Soyel material emission conversion
@@ -115,7 +115,7 @@ The bug is probably not in:
 - direct rendering of emissive geometry
 - raster/Three scene reset
 
-The bug is likely in Lupin's sampled light contribution path, especially one of:
+The remaining Lupin-level question is why `PathtraceType::Standard` did not contribute sampled area-light illumination for this scene. If that path is repaired in Lupin later, useful places to inspect include:
 
 - `pathtrace_standard`
 - `pathtrace_direct`
@@ -151,9 +151,9 @@ build_packed_scene_cpu: data_structures.rs:1065
 build_packed_accel_structures_and_upload: data_structures.rs:1186
 ```
 
-## Suggested Next Step
+## Optional Lupin Follow-Up
 
-Add Lupin-side packed GPU tests that render the same "vertical receiver plus off-camera area light" scene outside Soyel.
+Soyel's viewport-preview fix is to use the direct-light integrator. A deeper Lupin fix would still benefit from Lupin-side packed GPU tests that render the same "vertical receiver plus off-camera area light" scene outside Soyel.
 
 If that fails in Lupin directly, fix the issue in Lupin's packed light sampling / direct illumination path.
 
