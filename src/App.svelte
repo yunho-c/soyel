@@ -30,7 +30,6 @@
   import SparklesIcon from "lucide-svelte/icons/sparkles";
   import TerminalIcon from "lucide-svelte/icons/terminal";
   import TimerIcon from "lucide-svelte/icons/timer";
-  import UploadIcon from "lucide-svelte/icons/upload";
 
   import SampleCountMenu from "$lib/components/SampleCountMenu.svelte";
   import SceneNodeTree from "$lib/components/scene/SceneNodeTree.svelte";
@@ -86,7 +85,6 @@
   let previewFrame = $state<RenderPreviewFrame | null>(null);
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
   let previewHost = $state<HTMLDivElement | null>(null);
-  let sceneFileInput = $state<HTMLInputElement | null>(null);
   let rasterSceneInstance = $state(0);
   let previewSize = $state({ width: 360, height: 260 });
   let query = $state("");
@@ -96,6 +94,7 @@
   let isLoading = $state(false);
   let isApplying = $state(false);
   let isSceneImporting = $state(false);
+  let isSceneDropActive = $state(false);
   let isRendering = $state(false);
   let isViewportInteracting = $state(false);
   let pathTraceStale = $state(true);
@@ -104,6 +103,7 @@
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let activePreviewRevision = 0;
   let activePreviewRequest = 0;
+  let sceneDragDepth = 0;
   const sampleCountPresets = [16, 32, 64, 128, 256, 512, 1024];
   const sampleCountStorageKey = "soyel:rt-sample-counts:v1";
   let previewSamples = $state(128);
@@ -449,7 +449,47 @@
 
   function handleSceneDrop(event: DragEvent) {
     event.preventDefault();
+    sceneDragDepth = 0;
+    isSceneDropActive = false;
     void importSceneFromInput(event.dataTransfer?.files ?? null);
+  }
+
+  function handleSceneDragEnter(event: DragEvent) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    sceneDragDepth += 1;
+    isSceneDropActive = true;
+  }
+
+  function handleSceneDragOver(event: DragEvent) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    isSceneDropActive = true;
+  }
+
+  function handleSceneDragLeave(event: DragEvent) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    sceneDragDepth = Math.max(0, sceneDragDepth - 1);
+    if (sceneDragDepth === 0) {
+      isSceneDropActive = false;
+    }
+  }
+
+  function isFileDrag(event: DragEvent) {
+    return Array.from(event.dataTransfer?.types ?? []).includes("Files");
   }
 
   function toggleNodeVisibility(id: string, visible: boolean) {
@@ -772,7 +812,13 @@
   }
 </script>
 
-<main class="flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground">
+<main
+  class="relative flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground"
+  ondragenter={handleSceneDragEnter}
+  ondragover={handleSceneDragOver}
+  ondragleave={handleSceneDragLeave}
+  ondrop={handleSceneDrop}
+>
   <div class="relative flex h-8 shrink-0 items-center justify-end border-b bg-card px-2">
     <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-1/2 -translate-x-1/2 items-center justify-center lg:flex">
       <div class="pointer-events-auto flex h-6 w-full items-center gap-1.5 rounded-sm border bg-background px-1.5">
@@ -895,46 +941,13 @@
               </Button>
             </div>
 
-            <div class="flex min-h-0 flex-1 flex-col overflow-auto p-3">
+            <div
+              class="flex min-h-0 flex-1 flex-col p-3"
+              class:overflow-hidden={layout.activeActivity === "scene"}
+              class:overflow-auto={layout.activeActivity !== "scene"}
+            >
               {#if layout.activeActivity === "scene"}
-                <div class="flex min-h-0 flex-1 flex-col gap-3">
-                  <input
-                    bind:this={sceneFileInput}
-                    type="file"
-                    multiple
-                    accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,model/gltf-binary,model/gltf+json,image/png,image/jpeg,image/webp,application/octet-stream"
-                    class="hidden"
-                    onchange={(event) => {
-                      const input = event.currentTarget;
-                      void importSceneFromInput(input.files);
-                      input.value = "";
-                    }}
-                  />
-                  <div
-                    class="grid gap-3 rounded-md border border-dashed bg-background p-3"
-                    role="region"
-                    aria-label="GLB and glTF import"
-                    ondragover={(event) => event.preventDefault()}
-                    ondrop={handleSceneDrop}
-                  >
-                    <div class="flex items-center justify-between gap-3">
-                      <div class="min-w-0">
-                        <div class="truncate text-sm font-medium">GLB / glTF Scene</div>
-                        <div class="mt-1 truncate text-xs text-muted-foreground">
-                          Select .glb, or .gltf with .bin/images · {Object.values(viewportScene.nodes).length} nodes
-                        </div>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={isSceneImporting}
-                        onclick={() => sceneFileInput?.click()}
-                      >
-                        <UploadIcon data-icon="inline-start" />
-                        {isSceneImporting ? "Importing" : "Import"}
-                      </Button>
-                    </div>
-                  </div>
+                <div class="flex min-h-0 flex-1 flex-col">
                   <SceneNodeTree
                     scene={viewportScene}
                     onSelectNode={selectSceneNode}
@@ -1355,4 +1368,19 @@
       {/if}
     </div>
   </footer>
+
+  {#if isSceneDropActive || isSceneImporting}
+    <div
+      class="pointer-events-none absolute inset-0 z-50 grid place-items-center bg-background/72 p-8 backdrop-blur-sm"
+      aria-live="polite"
+    >
+      <div class="grid min-h-44 w-full max-w-md place-items-center gap-3 rounded-md border border-dashed border-primary/70 bg-card/95 px-6 py-8 text-center shadow-lg">
+        <FileStackIcon class="size-7 text-primary" />
+        <div class="grid gap-1">
+          <div class="text-sm font-semibold">{isSceneImporting ? "Importing scene" : "Drop scene assets"}</div>
+          <div class="text-xs text-muted-foreground">GLB, or glTF with sidecar buffers and images</div>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>

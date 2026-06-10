@@ -219,12 +219,12 @@
   }
 </script>
 
-<div class="flex min-h-0 flex-1 flex-col gap-3">
-  <div class="min-h-64 overflow-hidden rounded-md border bg-background">
-    <div bind:this={treeHost} class="h-full min-h-64"></div>
+<div class="flex h-full min-h-0 flex-1 flex-col gap-3">
+  <div class="min-h-0 flex-1 overflow-hidden rounded-md border bg-background">
+    <div bind:this={treeHost} class="h-full min-h-0"></div>
   </div>
 
-  <div class="rounded-md border bg-background p-3">
+  <div class="shrink-0 rounded-md border bg-background p-3">
     {#if selectedRow}
       <div class="flex items-center justify-between gap-3">
         <div class="min-w-0">
