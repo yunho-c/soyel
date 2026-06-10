@@ -51,6 +51,7 @@
     type PolyHavenCategory,
     type PolyHavenMaterial,
     type RenderPreviewFrame,
+    type RenderPreviewStreamFrame,
     type RendererStatus,
   } from "$lib/materials";
   import { importGltfScene } from "$lib/gltf-importer";
@@ -82,7 +83,7 @@
   let selectedMaterial = $state<PolyHavenMaterial | null>(null);
   let selectedFiles = $state<MaterialFile[]>([]);
   let downloaded = $state<DownloadedMaterial | null>(null);
-  let previewFrame = $state<RenderPreviewFrame | null>(null);
+  let previewFrame = $state<RenderPreviewStreamFrame | null>(null);
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
   let previewHost = $state<HTMLDivElement | null>(null);
   let rasterSceneInstance = $state(0);
@@ -155,6 +156,8 @@
     viewportDisplayMode === "ray-traced" && !isRendering && !hasPathTracedPixels,
   );
   let rayTraceNotice = $derived(previewError || "No ray-traced frame");
+  let previewProgressPercent = $derived(renderProgressPercent(previewFrame, isRendering));
+  let previewProgressLabel = $derived(`${previewProgressPercent}%`);
   let lastRequestedViewportDisplayMode = $state<ViewportDisplayMode>("hybrid");
   let selectedSceneNodeLabel = $derived(
     viewportScene.selection ? (viewportScene.nodes[viewportScene.selection]?.name ?? "None") : "None",
@@ -578,6 +581,16 @@
     }
 
     return `${Math.round(value / 1000)} KB`;
+  }
+
+  function renderProgressPercent(frame: RenderPreviewStreamFrame | null, rendering: boolean) {
+    if (!frame) {
+      return rendering ? 0 : 100;
+    }
+
+    const total = Math.max(1, frame.requestedSamples);
+    const completed = frame.final ? total : Math.min(total, Math.max(0, frame.samples));
+    return Math.round((completed / total) * 100);
   }
 
   function appliedForSurface(surfaceId: string) {
@@ -1366,6 +1379,12 @@
       {#if errorMessage}
         <span class="ml-2">Attention</span>
       {/if}
+      <span
+        class="ml-2 min-w-9 text-right tabular-nums text-primary-foreground/85"
+        title={`Preview render progress: ${previewFrame?.samples ?? 0}/${previewFrame?.requestedSamples ?? previewSamples} samples`}
+      >
+        {previewProgressLabel}
+      </span>
     </div>
   </footer>
 
